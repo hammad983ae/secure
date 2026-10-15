@@ -13,7 +13,8 @@ struct SettingsView: View {
             GeneralSettings()
                 .tabItem { Label("General", systemImage: "gearshape") }
         }
-        .frame(width: 720, height: 520)
+        .frame(width: 720, height: 560)
+        .preferredColorScheme(.dark)
     }
 }
 
@@ -154,6 +155,10 @@ private struct AgentEditor: View {
                 if promptMode == 1 {
                     TextField("Flag", text: $promptFlag)
                 }
+                Picker("When asked from chat", selection: $draft.headlessPermission) {
+                    ForEach(HeadlessPermission.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                .disabled(draft.headless == .none)
                 Picker("Shared MCP servers", selection: $draft.mcpInjection) {
                     Text("Don't pass").tag(MCPInjection.none)
                     Text("--mcp-config file (Claude Code)").tag(MCPInjection.claudeMCPConfigFlag)
@@ -419,6 +424,13 @@ private struct GeneralSettings: View {
                 Text("Applies when no session is selected. With an Anthropic router the default model is \(AutoRouter.defaultAnthropicModel).")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+
+            Section("Menu bar") {
+                Toggle("Show usage widget in the menu bar", isOn: Binding(
+                    get: { state.config.showMenuBarWidget },
+                    set: { value in state.updateConfig { $0.showMenuBarWidget = value } }
+                ))
             }
 
             Section("Usage") {

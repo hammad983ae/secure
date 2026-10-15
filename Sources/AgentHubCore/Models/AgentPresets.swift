@@ -7,28 +7,32 @@ public enum AgentPresets {
         id: UUID(uuidString: "6C1A0C0D-0000-4000-8000-000000000001")!,
         name: "Claude Code", handle: "claude", kind: .cli, symbol: "sparkle",
         summary: "Anthropic's coding agent. Strong at multi-file code changes, refactors, debugging, and explaining a codebase.",
-        command: "claude", promptStyle: .positional, mcpInjection: .claudeMCPConfigFlag
+        command: "claude", promptStyle: .positional, mcpInjection: .claudeMCPConfigFlag,
+        headless: .claudeCode
     )
 
     public static let codex = AgentDefinition(
         id: UUID(uuidString: "6C1A0C0D-0000-4000-8000-000000000002")!,
         name: "Codex CLI", handle: "codex", kind: .cli, symbol: "chevron.left.forwardslash.chevron.right",
         summary: "OpenAI's coding agent. Writes and edits code, runs commands and tests in the repo.",
-        command: "codex", promptStyle: .positional, mcpInjection: .codexConfigOverrides
+        command: "codex", promptStyle: .positional, mcpInjection: .codexConfigOverrides,
+        headless: .codex
     )
 
     public static let gemini = AgentDefinition(
         id: UUID(uuidString: "6C1A0C0D-0000-4000-8000-000000000003")!,
         name: "Gemini CLI", handle: "gemini", kind: .cli, symbol: "diamond",
         summary: "Google's coding agent. Code changes and questions about a codebase.",
-        command: "gemini", promptStyle: .flag("-i")
+        command: "gemini", promptStyle: .flag("-i"),
+        headless: .textOutput(arguments: ["-p"])
     )
 
     public static let aider = AgentDefinition(
         id: UUID(uuidString: "6C1A0C0D-0000-4000-8000-000000000004")!,
         name: "Aider", handle: "aider", kind: .cli, symbol: "wrench.and.screwdriver",
         summary: "Pair-programming agent that edits files and commits changes with git.",
-        command: "aider", promptStyle: .typeAfterLaunch
+        command: "aider", promptStyle: .typeAfterLaunch,
+        headless: .textOutput(arguments: ["--yes-always", "--no-pretty", "--no-stream", "--message"])
     )
 
     public static let claudeAPI = AgentDefinition(

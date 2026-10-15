@@ -23,6 +23,8 @@ public enum SessionStatus: String, Codable, CaseIterable, Sendable {
 
 public enum ChatRole: String, Codable, Sendable {
     case system, user, assistant, tool
+    /// Plain text output from a terminal agent run from chat.
+    case output
 }
 
 /// Where a tool call shown in a chat stands.

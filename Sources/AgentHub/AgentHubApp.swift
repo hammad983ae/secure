@@ -1,3 +1,4 @@
+import AgentHubCore
 import AppKit
 import SwiftUI
 
@@ -5,34 +6,56 @@ import SwiftUI
 @MainActor
 struct AgentHubApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @State private var state = AppState()
+    @State private var state = AppState(demo: Snapshot.isRequested)
 
     var body: some Scene {
-        WindowGroup("Agent Hub") {
-            ContentView()
+        WindowGroup("Agent Hub", id: "main") {
+            RootView()
                 .environment(state)
-                .frame(minWidth: 900, minHeight: 560)
+                .frame(minWidth: 980, minHeight: 620)
+                .task {
+                    if Snapshot.isRequested { await Snapshot.run(state: state) }
+                }
         }
+        .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: 1320, height: 860)
         .commands {
-            CommandGroup(after: .newItem) {
-                Button("New Session…") { state.showPalette = true }
+            CommandGroup(replacing: .newItem) {
+                Button("New Chat") { state.newConversation() }
+                    .keyboardShortcut("n", modifiers: .command)
+                Button("Command Palette…") { state.showPalette = true }
                     .keyboardShortcut("k", modifiers: .command)
-                Button("Task Board") { state.selection = .board }
+            }
+            CommandGroup(after: .sidebar) {
+                Button("Mission Control") { state.selection = .board }
                     .keyboardShortcut("b", modifiers: [.command, .shift])
                 Button("Usage") { state.selection = .usage }
                     .keyboardShortcut("u", modifiers: [.command, .shift])
-                Button(state.selectedSession.map { state.isInSplit($0) ? "Remove from Split View" : "Add to Split View" } ?? "Add to Split View") {
-                    if let session = state.selectedSession { state.toggleSplit(session) }
+                Divider()
+                Button("Toggle Split View") {
+                    if let session = state.selectedTerminal { state.toggleSplit(session) }
                 }
                 .keyboardShortcut("d", modifiers: .command)
-                .disabled(state.selectedSession == nil)
-                Button("Close Session") {
-                    if let session = state.selectedSession { state.close(session) }
+                .disabled(state.selectedTerminal == nil)
+                Button("Close Terminal") {
+                    if let session = state.selectedTerminal { state.close(session) }
                 }
                 .keyboardShortcut("w", modifiers: [.command, .shift])
-                .disabled(state.selectedSession == nil)
+                .disabled(state.selectedTerminal == nil)
             }
         }
+
+        MenuBarExtra(isInserted: Binding(
+            get: { state.config.showMenuBarWidget && !Snapshot.isRequested },
+            set: { value in state.updateConfig { $0.showMenuBarWidget = value } }
+        )) {
+            MenuBarPanel()
+                .environment(state)
+        } label: {
+            MenuBarLabel()
+                .environment(state)
+        }
+        .menuBarExtraStyle(.window)
 
         Settings {
             SettingsView()
@@ -49,5 +72,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    /// Keep running in the menu bar after the window closes.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 }

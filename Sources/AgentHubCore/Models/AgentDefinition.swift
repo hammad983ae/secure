@@ -66,6 +66,10 @@ public struct AgentDefinition: Identifiable, Codable, Hashable, Sendable {
     public var workingDirectory: String?
     public var promptStyle: PromptStyle
     public var mcpInjection: MCPInjection
+    /// How the agent runs from chat (without a terminal).
+    public var headless: HeadlessStyle
+    /// What the agent may do when run from chat.
+    public var headlessPermission: HeadlessPermission
 
     // API agents
     public var provider: APIProvider?
@@ -90,6 +94,8 @@ public struct AgentDefinition: Identifiable, Codable, Hashable, Sendable {
         workingDirectory: String? = nil,
         promptStyle: PromptStyle = .typeAfterLaunch,
         mcpInjection: MCPInjection = .none,
+        headless: HeadlessStyle = .textOutput(arguments: []),
+        headlessPermission: HeadlessPermission = .editFiles,
         provider: APIProvider? = nil,
         model: String? = nil,
         baseURL: String? = nil,
@@ -109,6 +115,8 @@ public struct AgentDefinition: Identifiable, Codable, Hashable, Sendable {
         self.workingDirectory = workingDirectory
         self.promptStyle = promptStyle
         self.mcpInjection = mcpInjection
+        self.headless = headless
+        self.headlessPermission = headlessPermission
         self.provider = provider
         self.model = model
         self.baseURL = baseURL
@@ -119,7 +127,7 @@ public struct AgentDefinition: Identifiable, Codable, Hashable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case id, name, handle, kind, symbol, summary, command, arguments, environment, workingDirectory
-        case promptStyle, mcpInjection, provider, model, baseURL, systemPrompt, useTools, confirmTools
+        case promptStyle, mcpInjection, headless, headlessPermission, provider, model, baseURL, systemPrompt, useTools, confirmTools
     }
 
     /// Fields added after the first release decode with defaults, so older
@@ -138,6 +146,8 @@ public struct AgentDefinition: Identifiable, Codable, Hashable, Sendable {
         workingDirectory = try c.decodeIfPresent(String.self, forKey: .workingDirectory)
         promptStyle = try c.decodeIfPresent(PromptStyle.self, forKey: .promptStyle) ?? .typeAfterLaunch
         mcpInjection = try c.decodeIfPresent(MCPInjection.self, forKey: .mcpInjection) ?? .none
+        headless = try c.decodeIfPresent(HeadlessStyle.self, forKey: .headless) ?? .textOutput(arguments: [])
+        headlessPermission = try c.decodeIfPresent(HeadlessPermission.self, forKey: .headlessPermission) ?? .editFiles
         provider = try c.decodeIfPresent(APIProvider.self, forKey: .provider)
         model = try c.decodeIfPresent(String.self, forKey: .model)
         baseURL = try c.decodeIfPresent(String.self, forKey: .baseURL)
@@ -147,6 +157,9 @@ public struct AgentDefinition: Identifiable, Codable, Hashable, Sendable {
     }
 
     public var runsInTerminal: Bool { kind != .api }
+
+    /// Can take tasks from the chat interface.
+    public var supportsChat: Bool { kind == .api || headless != .none }
 
     /// Keychain account under which this agent's API key is stored.
     /// Agents of the same provider share a key unless they use a custom base URL.

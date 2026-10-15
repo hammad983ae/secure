@@ -36,6 +36,28 @@ public enum CommandParser {
         return ParsedCommand(mentions: mentions, mentionsAll: mentionsAll, task: String(rest))
     }
 
+    /// Handles mentioned anywhere in the text (`@handle` at the start of a word), in order.
+    public static func inlineMentions(in input: String, knownHandles: Set<String>) -> [String] {
+        var result: [String] = []
+        for word in input.split(whereSeparator: { $0.isWhitespace }) where word.hasPrefix("@") {
+            let handle = word.dropFirst()
+                .trimmingCharacters(in: CharacterSet(charactersIn: ".,:;!?)(\"'"))
+                .lowercased()
+            if knownHandles.contains(handle), !result.contains(handle) { result.append(handle) }
+        }
+        return result
+    }
+
+    /// Agents a chat message is addressed to: the leading mentions, or if there
+    /// are none, any mentions in the text ("can you @claude look at this").
+    public static func chatCommand(_ input: String, knownHandles: Set<String>) -> ParsedCommand {
+        var command = parse(input, knownHandles: knownHandles)
+        if command.mentions.isEmpty, !command.mentionsAll {
+            command.mentions = inlineMentions(in: input, knownHandles: knownHandles)
+        }
+        return command
+    }
+
     /// Handle suggestions for the word being typed, for autocomplete.
     public static func completions(for input: String, handles: [String]) -> [String] {
         guard let last = input.split(separator: " ", omittingEmptySubsequences: false).last,

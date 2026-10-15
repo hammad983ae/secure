@@ -1,79 +1,63 @@
 import AgentHubCore
 import SwiftUI
 
-/// A closed session from history: what happened, and a way to pick it back up.
+/// A closed terminal session (or a chat saved before chats existed).
 struct HistoryDetailView: View {
     @Environment(AppState.self) private var state
     let record: SessionRecord
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                Image(systemName: record.agentSymbol)
-                Text(record.title).font(.headline).lineLimit(1)
-                StatusBadge(status: record.status)
-                Spacer()
-                if !record.usage.isEmpty {
-                    UsagePill(usage: record.usage, model: state.config.agents.first { $0.id == record.agentID }?.model ?? "")
-                }
-                Button(record.kind == .chat ? "Continue Chat" : "Run Again") { state.reopen(record) }
-                    .buttonStyle(.borderedProminent)
-                Button("Delete", role: .destructive) { state.deleteHistory(record) }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            Divider()
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 6) {
-                        GridRow {
-                            Text("Agent").foregroundStyle(.secondary)
-                            Text(record.agentName)
-                        }
-                        GridRow {
-                            Text("Started").foregroundStyle(.secondary)
-                            Text(record.createdAt, format: .dateTime)
-                        }
-                        GridRow {
-                            Text("Last active").foregroundStyle(.secondary)
-                            Text(record.updatedAt, format: .dateTime)
-                        }
-                        if let directory = record.workingDirectory {
-                            GridRow {
-                                Text("Folder").foregroundStyle(.secondary)
-                                Text(directory).textSelection(.enabled)
-                            }
-                        }
-                        if let commandLine = record.commandLine {
-                            GridRow {
-                                Text("Command").foregroundStyle(.secondary)
-                                Text(commandLine).font(.callout.monospaced()).textSelection(.enabled)
-                            }
-                        }
-                        if let task = record.task, !task.isEmpty {
-                            GridRow {
-                                Text("Task").foregroundStyle(.secondary)
-                                Text(task).textSelection(.enabled)
-                            }
-                        }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack(spacing: 12) {
+                    AgentAvatar(symbol: record.agentSymbol, color: AgentColors.color(id: record.agentID), size: 36)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(record.title).font(Theme.display(20)).lineLimit(2)
+                        Text(record.agentName).font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
                     }
+                    StatusBadge(status: record.status)
+                    Spacer()
+                    Button("Run Again") { state.rerun(record) }
+                        .buttonStyle(NeonButtonStyle())
+                    Button("Delete") { state.deleteHistory(record) }
+                        .buttonStyle(GlassButtonStyle())
+                }
 
-                    if record.kind == .chat {
-                        Divider()
+                VStack(alignment: .leading, spacing: 10) {
+                    detailRow("Started", record.createdAt.formatted(date: .abbreviated, time: .shortened))
+                    detailRow("Last active", record.updatedAt.formatted(date: .abbreviated, time: .shortened))
+                    if let directory = record.workingDirectory { detailRow("Folder", directory) }
+                    if let commandLine = record.commandLine { detailRow("Command", commandLine, mono: true) }
+                    if let task = record.task, !task.isEmpty { detailRow("Task", task) }
+                }
+                .padding(16)
+                .glassCard()
+
+                if record.messages.isEmpty {
+                    Text("Terminal output isn't saved. Run Again starts the same agent with the same task and folder.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.textTertiary)
+                } else {
+                    VStack(alignment: .leading, spacing: 10) {
                         ForEach(record.messages) { message in
-                            ChatBubble(message: message)
-                                .disabled(true)
+                            RunMessageView(message: message, accent: AgentColors.color(id: record.agentID))
                         }
-                    } else {
-                        Text("Terminal output isn't saved. Run Again starts the same agent with the same task and folder.")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
                     }
+                    .padding(16)
+                    .glassCard()
                 }
-                .padding()
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .padding(26)
+            .frame(maxWidth: 900, alignment: .leading)
+        }
+    }
+
+    private func detailRow(_ title: String, _ value: String, mono: Bool = false) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text(title).hudLabel().frame(width: 90, alignment: .leading)
+            Text(value)
+                .font(mono ? .system(size: 12, design: .monospaced) : .system(size: 13))
+                .textSelection(.enabled)
         }
     }
 }

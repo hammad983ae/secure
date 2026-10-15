@@ -525,3 +525,145 @@ final class HubStoreTests: XCTestCase {
         XCTAssertEqual(usage.load(), [entry, entry])
     }
 }
+
+final class HeadlessTests: XCTestCase {
+    func testClaudeHeadlessCommand() throws {
+        var agent = AgentPresets.claudeCode
+        agent.workingDirectory = "/tmp/proj"
+        let server = MCPServerConfig(name: "fs", transport: .stdio(command: "npx", arguments: [], environment: [:]))
+        let spec = try XCTUnwrap(LaunchPlanner.headless(agent: agent, prompt: "fix it", resumeID: "abc", mcpServers: [server], mcpConfigPath: "/tmp/m.json"))
+        XCTAssertEqual(spec.commandLine, "exec claude -p --output-format stream-json --verbose --permission-mode acceptEdits --mcp-config /tmp/m.json --resume abc 'fix it'")
+        XCTAssertEqual(spec.arguments.last, "cd /tmp/proj && " + spec.commandLine)
+        XCTAssertEqual(spec.environment["NO_COLOR"], "1")
+    }
+
+    func testCodexHeadlessCommandAndPermissions() throws {
+        var agent = AgentPresets.codex
+        agent.headlessPermission = .readOnly
+        let spec = try XCTUnwrap(LaunchPlanner.headless(agent: agent, prompt: "review", resumeID: "t-1"))
+        XCTAssertEqual(spec.commandLine, "exec codex exec --json --skip-git-repo-check --sandbox read-only resume t-1 review")
+        XCTAssertEqual(LaunchPlanner.interactiveResumeArguments(for: agent, resumeID: "t-1"), ["resume", "t-1"])
+    }
+
+    func testTextAgentsAndShell() throws {
+        let gemini = try XCTUnwrap(LaunchPlanner.headless(agent: AgentPresets.gemini, prompt: "hi there"))
+        XCTAssertEqual(gemini.commandLine, "exec gemini -p 'hi there'")
+        let shell = try XCTUnwrap(LaunchPlanner.headless(agent: AgentPresets.shell, prompt: "ls -la | head"))
+        XCTAssertEqual(shell.commandLine, "ls -la | head")
+        var none = AgentPresets.claudeCode
+        none.headless = .none
+        XCTAssertNil(LaunchPlanner.headless(agent: none, prompt: "x"))
+    }
+
+    func testClaudeStreamParser() {
+        var parser = ClaudeStreamParser()
+        let lines = [
+            #"{"type":"system","subtype":"init","session_id":"s1","model":"claude-opus-5-5","tools":[]}"#,
+            #"{"type":"assistant","message":{"id":"m1","model":"claude-opus-5-5","content":[{"type":"text","text":"Looking."}],"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":100}}}"#,
+            #"{"type":"assistant","message":{"id":"m1","model":"claude-opus-5-5","content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{"command":"ls"}}],"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":100}}}"#,
+            #"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":[{"type":"text","text":"a.txt"}],"is_error":false}]}}"#,
+            #"{"type":"result","subtype":"success","is_error":false,"result":"done","total_cost_usd":0.12,"session_id":"s1"}"#,
+        ]
+        let events = lines.flatMap { parser.parse(line: $0) }
+        XCTAssertEqual(events, [
+            .started(sessionID: "s1", model: "claude-opus-5-5"),
+            .text("Looking."),
+            .usage(TokenUsage(input: 10, output: 5, cacheRead: 100), model: "claude-opus-5-5"),
+            .toolStarted(id: "tu1", name: "Bash", detail: "ls"),
+            .toolFinished(id: "tu1", output: "a.txt", isError: false),
+            .finished(isError: false, message: nil, costUSD: 0.12),
+        ])
+    }
+
+    func testCodexStreamParser() {
+        var parser = CodexStreamParser()
+        let lines = [
+            #"{"type":"thread.started","thread_id":"th1"}"#,
+            #"{"type":"item.started","item":{"id":"i1","type":"command_execution","command":"ls","status":"in_progress"}}"#,
+            #"{"type":"item.completed","item":{"id":"i1","type":"command_execution","command":"ls","aggregated_output":"a.txt\n","exit_code":0,"status":"completed"}}"#,
+            #"{"type":"item.completed","item":{"id":"i2","type":"file_change","changes":[{"path":"a.txt","kind":"update"}],"status":"completed"}}"#,
+            #"{"type":"item.completed","item":{"id":"i3","type":"agent_message","text":"Done."}}"#,
+            #"{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":7}}"#,
+        ]
+        let events = lines.flatMap { parser.parse(line: $0) }
+        XCTAssertEqual(events, [
+            .started(sessionID: "th1", model: nil),
+            .toolStarted(id: "i1", name: "shell", detail: "ls"),
+            .toolFinished(id: "i1", output: "a.txt\n", isError: false),
+            .toolStarted(id: "i2", name: "edit", detail: "update a.txt"),
+            .toolFinished(id: "i2", output: "update a.txt", isError: false),
+            .text("Done."),
+            .usage(TokenUsage(input: 60, output: 7, cacheRead: 40), model: nil),
+        ])
+        XCTAssertEqual(parser.parse(line: #"{"type":"turn.failed","error":{"message":"boom"}}"#), [.finished(isError: true, message: "boom", costUSD: nil)])
+    }
+
+    func testANSIStripping() {
+        XCTAssertEqual(TextOutputParser.stripANSI("\u{1B}[1;32mok\u{1B}[0m\r"), "ok")
+    }
+
+    /// Runs a real process through the headless runner.
+    func testRunnerStreamsShellOutput() async throws {
+        let spec = try XCTUnwrap(LaunchPlanner.headless(agent: AgentPresets.shell, prompt: "echo one; echo two", shell: "/bin/sh"))
+        var outputs: [String] = []
+        var finished: HeadlessEvent?
+        for try await event in HeadlessRunner().run(spec, style: .textOutput(arguments: [])) {
+            switch event {
+            case let .output(text): outputs.append(text)
+            case .finished: finished = event
+            default: break
+            }
+        }
+        XCTAssertEqual(outputs, ["one\n", "two\n"])
+        XCTAssertEqual(finished, .finished(isError: false, message: nil, costUSD: nil))
+    }
+
+    func testRunnerReportsFailure() async throws {
+        let spec = try XCTUnwrap(LaunchPlanner.headless(agent: AgentPresets.shell, prompt: "echo bad >&2; exit 3", shell: "/bin/sh"))
+        var last: HeadlessEvent?
+        for try await event in HeadlessRunner().run(spec, style: .textOutput(arguments: [])) { last = event }
+        XCTAssertEqual(last, .finished(isError: true, message: "bad", costUSD: nil))
+    }
+}
+
+final class ConversationTests: XCTestCase {
+    func testChatCommandFindsInlineMentions() {
+        let handles: Set<String> = ["claude", "codex"]
+        XCTAssertEqual(CommandParser.chatCommand("can you @claude look at this?", knownHandles: handles).mentions, ["claude"])
+        XCTAssertEqual(CommandParser.chatCommand("@codex review what @claude did", knownHandles: handles).mentions, ["codex"])
+        XCTAssertEqual(CommandParser.chatCommand("@codex review what @claude did", knownHandles: handles).task, "review what @claude did")
+    }
+
+    func testContextSharesOtherAgentsReplies() {
+        var conversation = Conversation()
+        conversation.entries.append(.user("@claude find the bug"))
+        var run = AgentRun(agent: AgentPresets.claudeCode)
+        run.messages = [ChatMessage(role: .assistant, text: "The bug is in cart.ts")]
+        run.status = .done
+        conversation.entries.append(.run(run))
+
+        let prompt = ConversationContext.prompt(task: "fix it", for: AgentPresets.codex.id, in: conversation)
+        XCTAssertTrue(prompt.contains(#"<reply agent="Claude Code">"#))
+        XCTAssertTrue(prompt.contains("The bug is in cart.ts"))
+        XCTAssertTrue(prompt.hasSuffix("fix it"))
+
+        // Claude itself doesn't get its own reply echoed back.
+        XCTAssertEqual(ConversationContext.prompt(task: "more", for: AgentPresets.claudeCode.id, in: conversation), "more")
+
+        // Once seen, it isn't repeated.
+        conversation.updateParticipant(AgentPresets.codex.id) { $0.seenEntryCount = conversation.entries.count }
+        XCTAssertEqual(ConversationContext.prompt(task: "next", for: AgentPresets.codex.id, in: conversation), "next")
+    }
+
+    func testTitleAndStoreRoundTrip() throws {
+        XCTAssertEqual(Conversation.title(from: "@claude @codex fix the flaky tests"), "fix the flaky tests")
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = ConversationStore(directory: dir)
+        var conversation = Conversation(title: "t", createdAt: Date(timeIntervalSince1970: 1000))
+        conversation.updatedAt = Date(timeIntervalSince1970: 2000)
+        conversation.entries.append(.user("hi", date: Date(timeIntervalSince1970: 1000)))
+        try store.save(conversation)
+        XCTAssertEqual(store.loadAll(), [conversation])
+    }
+}

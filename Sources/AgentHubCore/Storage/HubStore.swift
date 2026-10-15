@@ -15,6 +15,10 @@ public struct HubConfiguration: Codable, Equatable, Sendable {
     public var routerModel: String?
     /// Read Claude Code and Codex logs for the usage dashboard.
     public var scanAgentLogs: Bool
+    /// False for configs saved before agents had headless settings (they get preset values once).
+    public var hasHeadlessSettings: Bool
+    /// Show the usage widget in the menu bar.
+    public var showMenuBarWidget: Bool
 
     public init(
         agents: [AgentDefinition] = AgentPresets.all,
@@ -23,7 +27,8 @@ public struct HubConfiguration: Codable, Equatable, Sendable {
         autoRoute: Bool = true,
         routerAgentID: UUID? = nil,
         routerModel: String? = nil,
-        scanAgentLogs: Bool = true
+        scanAgentLogs: Bool = true,
+        showMenuBarWidget: Bool = true
     ) {
         self.agents = agents
         self.mcpServers = mcpServers
@@ -32,10 +37,13 @@ public struct HubConfiguration: Codable, Equatable, Sendable {
         self.routerAgentID = routerAgentID
         self.routerModel = routerModel
         self.scanAgentLogs = scanAgentLogs
+        self.hasHeadlessSettings = true
+        self.showMenuBarWidget = showMenuBarWidget
     }
 
     private enum CodingKeys: String, CodingKey {
         case agents, mcpServers, defaultWorkingDirectory, autoRoute, routerAgentID, routerModel, scanAgentLogs
+        case hasHeadlessSettings, showMenuBarWidget
     }
 
     public init(from decoder: Decoder) throws {
@@ -47,6 +55,8 @@ public struct HubConfiguration: Codable, Equatable, Sendable {
         routerAgentID = try c.decodeIfPresent(UUID.self, forKey: .routerAgentID)
         routerModel = try c.decodeIfPresent(String.self, forKey: .routerModel)
         scanAgentLogs = try c.decodeIfPresent(Bool.self, forKey: .scanAgentLogs) ?? true
+        hasHeadlessSettings = try c.decodeIfPresent(Bool.self, forKey: .hasHeadlessSettings) ?? false
+        showMenuBarWidget = try c.decodeIfPresent(Bool.self, forKey: .showMenuBarWidget) ?? true
     }
 
     /// The agent used for auto-routing, with the router model applied.
@@ -79,12 +89,13 @@ public struct HubStore: Sendable {
         guard let data = try? Data(contentsOf: configURL),
               var config = try? JSONDecoder().decode(HubConfiguration.self, from: data)
         else { return HubConfiguration() }
-        // Built-in agents saved before summaries existed pick them up.
-        for index in config.agents.indices where config.agents[index].summary.isEmpty {
-            if let preset = AgentPresets.all.first(where: { $0.id == config.agents[index].id }) {
-                config.agents[index].summary = preset.summary
-            }
+        // Built-in agents saved before newer fields existed pick up their defaults.
+        for index in config.agents.indices {
+            guard let preset = AgentPresets.all.first(where: { $0.id == config.agents[index].id }) else { continue }
+            if config.agents[index].summary.isEmpty { config.agents[index].summary = preset.summary }
+            if !config.hasHeadlessSettings { config.agents[index].headless = preset.headless }
         }
+        config.hasHeadlessSettings = true
         return config
     }
 

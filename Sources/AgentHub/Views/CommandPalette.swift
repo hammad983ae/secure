@@ -2,100 +2,106 @@ import AgentHubCore
 import AppKit
 import SwiftUI
 
-/// ⌘K: start a task on one or more agents, or jump to an open session.
+/// ⌘K: start agents in interactive terminals, or jump to a chat.
 struct CommandPalette: View {
     @Environment(AppState.self) private var state
     @Environment(\.dismiss) private var dismiss
-    @State private var task = ""
-    @State private var chosen: Set<UUID> = []
+    @State private var query = ""
     @State private var directory = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("New Session").font(.title2.bold())
-
-            TextField("What should the agent do? (optional)", text: $task, axis: .vertical)
-                .lineLimit(2...6)
-                .textFieldStyle(.roundedBorder)
-
-            Text("Agents").font(.headline)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(state.config.agents) { agent in
-                        Toggle(isOn: binding(for: agent.id)) {
-                            HStack {
-                                Label(agent.name, systemImage: agent.symbol)
-                                Text("@\(agent.handle)").foregroundStyle(.secondary)
-                                if state.isInstalled(agent) == false {
-                                    Text("not found on PATH").font(.caption).foregroundStyle(.orange)
-                                }
-                            }
-                        }
-                        .toggleStyle(.checkbox)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(spacing: 10) {
+                Image(systemName: "magnifyingglass").foregroundStyle(Theme.cyan)
+                TextField("Search chats, or filter agents…", text: $query)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 16))
             }
-            .frame(maxHeight: 220)
+            .padding(12)
+            .glassCard(radius: 12)
+
+            Text("Open a terminal").hudLabel()
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 8)], spacing: 8) {
+                ForEach(terminalAgents) { agent in
+                    Button {
+                        let dir = directory.trimmingCharacters(in: .whitespaces)
+                        state.startTerminal(agent: agent, task: nil, workingDirectory: dir.isEmpty ? nil : dir)
+                        dismiss()
+                    } label: {
+                        HStack(spacing: 8) {
+                            AgentAvatar(symbol: agent.symbol, color: AgentColors.color(for: agent), size: 22)
+                            Text(agent.name).font(.system(size: 12.5, weight: .medium)).lineLimit(1)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(8)
+                        .glassCard(radius: 10, tint: AgentColors.color(for: agent))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(state.isInstalled(agent) == false)
+                    .opacity(state.isInstalled(agent) == false ? 0.4 : 1)
+                }
+            }
 
             HStack {
-                TextField("Working directory (terminal agents)", text: $directory)
-                    .textFieldStyle(.roundedBorder)
-                Button("Choose…", action: chooseDirectory)
+                TextField("Folder (optional)", text: $directory)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12, design: .monospaced))
+                    .padding(8)
+                    .glassCard(radius: 8)
+                Button("Choose…", action: chooseDirectory).buttonStyle(GlassButtonStyle())
             }
 
-            if !state.sessions.isEmpty {
-                Text("Open sessions").font(.headline)
-                ForEach(state.sessions.filter(matchesQuery)) { session in
+            if !matchingChats.isEmpty {
+                Text("Chats").hudLabel()
+                ForEach(matchingChats.prefix(6)) { model in
                     Button {
-                        state.select(session)
+                        state.selection = .chat(model.id)
                         dismiss()
                     } label: {
                         HStack {
-                            Label(session.title, systemImage: session.agent.symbol)
+                            Image(systemName: "bubble.left.and.bubble.right").foregroundStyle(Theme.textTertiary)
+                            Text(model.conversation.title).lineLimit(1)
                             Spacer()
-                            StatusBadge(status: session.status)
+                            Text(model.conversation.updatedAt, format: .relative(presentation: .named))
+                                .font(.system(size: 11)).foregroundStyle(Theme.textTertiary)
                         }
+                        .padding(.vertical, 4)
+                        .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                 }
             }
 
             HStack {
+                Button("New Chat") {
+                    state.newConversation()
+                    dismiss()
+                }
+                .buttonStyle(NeonButtonStyle())
                 Spacer()
-                Button("Cancel") { dismiss() }
+                Button("Close") { dismiss() }
+                    .buttonStyle(GlassButtonStyle())
                     .keyboardShortcut(.cancelAction)
-                Button(chosen.count > 1 ? "Start \(chosen.count) Sessions" : "Start") { start() }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(chosen.isEmpty)
             }
         }
         .padding(20)
         .frame(width: 560)
-        .onAppear {
-            directory = state.config.defaultWorkingDirectory ?? ""
-            if chosen.isEmpty, let first = state.config.agents.first { chosen = [first.id] }
+        .background(LinearGradient(colors: [Theme.void, Theme.deep], startPoint: .top, endPoint: .bottom))
+        .foregroundStyle(Theme.textPrimary)
+        .preferredColorScheme(.dark)
+        .onAppear { directory = state.config.defaultWorkingDirectory ?? "" }
+    }
+
+    private var terminalAgents: [AgentDefinition] {
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        return state.config.agents.filter { $0.runsInTerminal && (q.isEmpty || $0.name.lowercased().contains(q) || $0.handle.contains(q)) }
+    }
+
+    private var matchingChats: [ConversationModel] {
+        let q = query.trimmingCharacters(in: .whitespaces)
+        return state.sortedConversations.filter {
+            !$0.conversation.entries.isEmpty && (q.isEmpty || $0.conversation.title.localizedCaseInsensitiveContains(q))
         }
-    }
-
-    private func binding(for id: UUID) -> Binding<Bool> {
-        Binding(
-            get: { chosen.contains(id) },
-            set: { isOn in if isOn { chosen.insert(id) } else { chosen.remove(id) } }
-        )
-    }
-
-    private func matchesQuery(_ session: AgentSession) -> Bool {
-        let query = task.trimmingCharacters(in: .whitespaces)
-        return query.isEmpty || session.title.localizedCaseInsensitiveContains(query)
-    }
-
-    private func start() {
-        let dir = directory.trimmingCharacters(in: .whitespaces)
-        for agent in state.config.agents where chosen.contains(agent.id) {
-            state.startSession(agent: agent, task: task, workingDirectory: dir.isEmpty ? nil : dir)
-        }
-        dismiss()
     }
 
     private func chooseDirectory() {
