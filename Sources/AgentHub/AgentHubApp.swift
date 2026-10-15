@@ -13,9 +13,6 @@ struct AgentHubApp: App {
             RootView()
                 .environment(state)
                 .frame(minWidth: 980, minHeight: 620)
-                .task {
-                    if Snapshot.isRequested { await Snapshot.run(state: state) }
-                }
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1320, height: 860)
@@ -70,6 +67,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // foreground app with a Dock icon and keyboard focus.
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+        if Snapshot.isRequested {
+            Task { @MainActor in await Snapshot.run() }
+        }
     }
 
     /// Keep running in the menu bar after the window closes.

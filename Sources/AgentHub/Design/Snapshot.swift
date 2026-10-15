@@ -16,17 +16,27 @@ enum Snapshot {
         return URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("snapshots")
     }
 
-    static func run(state: AppState) async {
+    /// Builds its own window around `RootView` with demo data, so it doesn't
+    /// depend on SwiftUI opening the main window.
+    static func run() async {
         let directory = outputDirectory
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try? await Task.sleep(for: .seconds(2))
+        log("starting, output \(directory.path)")
 
-        guard let window = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil && !($0 is NSPanel) }) else {
-            print("snapshot: no window")
-            NSApp.terminate(nil)
-            return
-        }
-        window.setFrame(NSRect(x: 0, y: 0, width: 1440, height: 900), display: true)
+        let state = AppState(demo: true)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1440, height: 900),
+            styleMask: [.titled, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.contentView = NSHostingView(rootView: RootView().environment(state).frame(width: 1440, height: 900))
+        window.setContentSize(NSSize(width: 1440, height: 900))
+        window.makeKeyAndOrderFront(nil)
+        try? await Task.sleep(for: .seconds(2))
 
         let chats = state.sortedConversations.filter { !$0.conversation.entries.isEmpty }
         var screens: [(String, SidebarItem)] = []
@@ -44,8 +54,9 @@ enum Snapshot {
         try? await Task.sleep(for: .seconds(1.5))
         capture(window, to: directory.appendingPathComponent("welcome.png"))
 
-        // The menu bar panel, rendered in its own window.
+        // The menu bar panel, in its own window.
         let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 340, height: 600), styleMask: [.borderless], backing: .buffered, defer: false)
+        panel.appearance = NSAppearance(named: .darkAqua)
         let host = NSHostingView(rootView: MenuBarPanel().environment(state))
         panel.contentView = host
         panel.setContentSize(host.fittingSize)
@@ -53,8 +64,12 @@ enum Snapshot {
         try? await Task.sleep(for: .seconds(1.5))
         capture(panel, to: directory.appendingPathComponent("menubar.png"))
 
-        print("snapshot: wrote \(directory.path)")
-        NSApp.terminate(nil)
+        log("done")
+        exit(0)
+    }
+
+    static func log(_ message: String) {
+        FileHandle.standardError.write(Data("snapshot: \(message)\n".utf8))
     }
 
     private static func capture(_ window: NSWindow, to url: URL) {
@@ -65,7 +80,9 @@ enum Snapshot {
         view.cacheDisplay(in: view.bounds, to: rep)
         if let data = rep.representation(using: .png, properties: [:]) {
             try? data.write(to: url)
-            print("snapshot: \(url.lastPathComponent) \(Int(view.bounds.width))x\(Int(view.bounds.height))")
+            log("\(url.lastPathComponent) \(Int(view.bounds.width))x\(Int(view.bounds.height))")
+        } else {
+            log("couldn't encode \(url.lastPathComponent)")
         }
     }
 }
