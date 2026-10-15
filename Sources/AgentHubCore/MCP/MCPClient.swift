@@ -151,10 +151,10 @@ public final class MCPClient: @unchecked Sendable {
     }
 
     private func call(_ method: String, params: JSONValue, timeout: TimeInterval) async throws -> JSONValue {
-        lock.lock()
-        let id = nextID
-        nextID += 1
-        lock.unlock()
+        let id = lock.withLock {
+            defer { nextID += 1 }
+            return nextID
+        }
 
         let response = try await transport.request(
             ["jsonrpc": "2.0", "id": .number(Double(id)), "method": .string(method), "params": params],
@@ -334,7 +334,7 @@ final class HTTPTransport: MCPTransport, @unchecked Sendable {
         let (data, response) = try await post(message, timeout: timeout)
         if let http = response as? HTTPURLResponse {
             if let newSession = http.value(forHTTPHeaderField: "Mcp-Session-Id") {
-                lock.lock(); sessionID = newSession; lock.unlock()
+                lock.withLock { sessionID = newSession }
             }
             guard (200..<300).contains(http.statusCode) else {
                 throw MCPError.badResponse("HTTP \(http.statusCode): \(String(decoding: data.prefix(300), as: UTF8.self))")
@@ -375,9 +375,9 @@ final class HTTPTransport: MCPTransport, @unchecked Sendable {
         request.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
         request.setValue(MCPClient.protocolVersion, forHTTPHeaderField: "MCP-Protocol-Version")
         for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
-        lock.lock()
-        if let sessionID { request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id") }
-        lock.unlock()
+        if let sessionID = lock.withLock({ sessionID }) {
+            request.setValue(sessionID, forHTTPHeaderField: "Mcp-Session-Id")
+        }
         return try await HTTP.data(for: request, session: session)
     }
 }

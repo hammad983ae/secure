@@ -9,10 +9,24 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - name: Use the newest Xcode on the runner
+        run: |
+          latest=$(ls -d /Applications/Xcode*.app | grep -vi beta | sort -V | tail -1)
+          echo "Using $latest"
+          sudo xcode-select -s "$latest/Contents/Developer"
       - name: Swift version
         run: swift --version
       - name: Build
-        run: swift build
+        run: |
+          set -o pipefail
+          swift build 2>&1 | tee build.log
+      - name: No warnings in our code
+        # Warnings here are often errors under Swift 6 or newer Xcode versions.
+        run: |
+          if grep -E "/Sources/AgentHub[A-Za-z]*/.*(warning|error):" build.log; then
+            echo "::error::Fix the compiler warnings above"
+            exit 1
+          fi
       - name: Test
         run: swift test
       - name: Bundle app
