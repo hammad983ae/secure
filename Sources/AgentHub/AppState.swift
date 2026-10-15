@@ -139,7 +139,11 @@ final class AppState {
                 MainActor.assumeIsolated { self?.refreshUsage() }
             }
         }
-        selection = conversations.first.map { .chat($0.id) } ?? .board
+        if let recent = sortedConversations.first(where: { !$0.conversation.entries.isEmpty }) {
+            selection = .chat(recent.id)
+        } else {
+            newConversation()
+        }
     }
 
     // MARK: Configuration

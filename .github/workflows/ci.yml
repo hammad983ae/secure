@@ -35,19 +35,3 @@ jobs:
         with:
           name: AgentHub.app
           path: build/AgentHub.app
-      - name: Screenshots
-        # Renders the main screens with demo data (see Snapshot.swift). Launched
-        # through LaunchServices so the app joins the runner's GUI session.
-        run: |
-          mkdir -p snapshots
-          open -n build/AgentHub.app --args --snapshot "$PWD/snapshots"
-          for i in $(seq 1 60); do
-            [ -f snapshots/menubar.png ] && break
-            sleep 2
-          done
-          pkill -f "AgentHub.app/Contents/MacOS/AgentHub" || true
-          ls -la snapshots
-      - uses: actions/upload-artifact@v4
-        with:
-          name: screenshots
-          path: snapshots
