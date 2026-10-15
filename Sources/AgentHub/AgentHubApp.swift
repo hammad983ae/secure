@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 
 @main
+@MainActor
 struct AgentHubApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var state = AppState()

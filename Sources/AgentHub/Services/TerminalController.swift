@@ -16,6 +16,7 @@ final class HubTerminalView: LocalProcessTerminalView {
 ///
 /// The terminal view lives as long as the session, not the SwiftUI view that
 /// shows it, so switching between sessions never restarts an agent.
+@MainActor
 final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
     let view: HubTerminalView
     private(set) var tracker = ActivityTracker()
@@ -45,14 +46,13 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
             execName: nil
         )
 
+        // Scheduled on the main run loop, so the block always runs on the main actor.
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            guard let self, let status = self.tracker.tick(at: Date()) else { return }
-            self.onStatusChange?(status)
+            MainActor.assumeIsolated {
+                guard let self, let status = self.tracker.tick(at: Date()) else { return }
+                self.onStatusChange?(status)
+            }
         }
-    }
-
-    deinit {
-        timer?.invalidate()
     }
 
     /// Types text into the agent and presses Return.

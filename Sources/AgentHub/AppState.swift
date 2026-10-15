@@ -3,6 +3,7 @@ import Foundation
 import Observation
 
 /// One running conversation with an agent: a live terminal or an API chat.
+@MainActor
 @Observable
 final class AgentSession: Identifiable {
     let id = UUID()
@@ -36,7 +37,8 @@ enum SidebarItem: Hashable {
     case session(UUID)
 }
 
-/// App-wide state. Mutated only on the main thread.
+/// App-wide state, owned by the main actor.
+@MainActor
 @Observable
 final class AppState {
     private let store: HubStore
