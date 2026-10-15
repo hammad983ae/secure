@@ -19,6 +19,13 @@ struct AgentHubApp: App {
                     .keyboardShortcut("k", modifiers: .command)
                 Button("Task Board") { state.selection = .board }
                     .keyboardShortcut("b", modifiers: [.command, .shift])
+                Button("Usage") { state.selection = .usage }
+                    .keyboardShortcut("u", modifiers: [.command, .shift])
+                Button(state.selectedSession.map { state.isInSplit($0) ? "Remove from Split View" : "Add to Split View" } ?? "Add to Split View") {
+                    if let session = state.selectedSession { state.toggleSplit(session) }
+                }
+                .keyboardShortcut("d", modifiers: .command)
+                .disabled(state.selectedSession == nil)
                 Button("Close Session") {
                     if let session = state.selectedSession { state.close(session) }
                 }

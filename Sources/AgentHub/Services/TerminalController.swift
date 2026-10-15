@@ -98,17 +98,20 @@ final class TerminalController: NSObject, LocalProcessTerminalViewDelegate {
     }
 
     // MARK: LocalProcessTerminalViewDelegate
+    //
+    // Some SwiftTerm versions declare this protocol main-actor isolated and some
+    // don't. `nonisolated` methods satisfy both; each hops to the main actor.
 
-    func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
+    nonisolated func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
 
-    func setTerminalTitle(source: LocalProcessTerminalView, title: String) {
-        DispatchQueue.main.async { [weak self] in self?.onTitleChange?(title) }
+    nonisolated func setTerminalTitle(source: LocalProcessTerminalView, title: String) {
+        Task { @MainActor [weak self] in self?.onTitleChange?(title) }
     }
 
-    func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
+    nonisolated func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
 
-    func processTerminated(source: TerminalView, exitCode: Int32?) {
-        DispatchQueue.main.async { [weak self] in
+    nonisolated func processTerminated(source: TerminalView, exitCode: Int32?) {
+        Task { @MainActor [weak self] in
             guard let self else { return }
             self.timer?.invalidate()
             self.timer = nil

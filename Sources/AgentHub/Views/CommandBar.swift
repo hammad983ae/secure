@@ -25,6 +25,7 @@ struct CommandBar: View {
             HStack(spacing: 8) {
                 Image(systemName: "chevron.right.2")
                     .foregroundStyle(.secondary)
+                if state.isRouting { ProgressView().controlSize(.small) }
                 TextField(placeholder, text: $text)
                     .textFieldStyle(.plain)
                     .font(.body.monospaced())
@@ -47,6 +48,9 @@ struct CommandBar: View {
     private var placeholder: String {
         if let session = state.selectedSession {
             return "Message \(session.agent.name)…   (@agent starts a new session, @all broadcasts)"
+        }
+        if state.config.autoRoute {
+            return "Describe a task and the best agent picks it up, or use @claude, @codex, @all…"
         }
         return "@claude @codex fix the failing tests   (@all sends to every live session)"
     }

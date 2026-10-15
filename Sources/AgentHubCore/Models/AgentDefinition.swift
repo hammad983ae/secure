@@ -56,6 +56,8 @@ public struct AgentDefinition: Identifiable, Codable, Hashable, Sendable {
     public var kind: AgentKind
     /// SF Symbol name shown in the UI.
     public var symbol: String
+    /// What this agent is good at; shown to the auto-router.
+    public var summary: String
 
     // Terminal agents (cli / script)
     public var command: String
@@ -70,6 +72,10 @@ public struct AgentDefinition: Identifiable, Codable, Hashable, Sendable {
     public var model: String?
     public var baseURL: String?
     public var systemPrompt: String?
+    /// API agents: offer the shared MCP servers' tools to the model.
+    public var useTools: Bool
+    /// API agents: ask before each tool call runs.
+    public var confirmTools: Bool
 
     public init(
         id: UUID = UUID(),
@@ -77,6 +83,7 @@ public struct AgentDefinition: Identifiable, Codable, Hashable, Sendable {
         handle: String,
         kind: AgentKind,
         symbol: String = "terminal",
+        summary: String = "",
         command: String = "",
         arguments: [String] = [],
         environment: [String: String] = [:],
@@ -86,13 +93,16 @@ public struct AgentDefinition: Identifiable, Codable, Hashable, Sendable {
         provider: APIProvider? = nil,
         model: String? = nil,
         baseURL: String? = nil,
-        systemPrompt: String? = nil
+        systemPrompt: String? = nil,
+        useTools: Bool = true,
+        confirmTools: Bool = true
     ) {
         self.id = id
         self.name = name
         self.handle = handle
         self.kind = kind
         self.symbol = symbol
+        self.summary = summary
         self.command = command
         self.arguments = arguments
         self.environment = environment
@@ -103,6 +113,37 @@ public struct AgentDefinition: Identifiable, Codable, Hashable, Sendable {
         self.model = model
         self.baseURL = baseURL
         self.systemPrompt = systemPrompt
+        self.useTools = useTools
+        self.confirmTools = confirmTools
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, handle, kind, symbol, summary, command, arguments, environment, workingDirectory
+        case promptStyle, mcpInjection, provider, model, baseURL, systemPrompt, useTools, confirmTools
+    }
+
+    /// Fields added after the first release decode with defaults, so older
+    /// config files keep loading.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        handle = try c.decode(String.self, forKey: .handle)
+        kind = try c.decode(AgentKind.self, forKey: .kind)
+        symbol = try c.decodeIfPresent(String.self, forKey: .symbol) ?? "terminal"
+        summary = try c.decodeIfPresent(String.self, forKey: .summary) ?? ""
+        command = try c.decodeIfPresent(String.self, forKey: .command) ?? ""
+        arguments = try c.decodeIfPresent([String].self, forKey: .arguments) ?? []
+        environment = try c.decodeIfPresent([String: String].self, forKey: .environment) ?? [:]
+        workingDirectory = try c.decodeIfPresent(String.self, forKey: .workingDirectory)
+        promptStyle = try c.decodeIfPresent(PromptStyle.self, forKey: .promptStyle) ?? .typeAfterLaunch
+        mcpInjection = try c.decodeIfPresent(MCPInjection.self, forKey: .mcpInjection) ?? .none
+        provider = try c.decodeIfPresent(APIProvider.self, forKey: .provider)
+        model = try c.decodeIfPresent(String.self, forKey: .model)
+        baseURL = try c.decodeIfPresent(String.self, forKey: .baseURL)
+        systemPrompt = try c.decodeIfPresent(String.self, forKey: .systemPrompt)
+        useTools = try c.decodeIfPresent(Bool.self, forKey: .useTools) ?? true
+        confirmTools = try c.decodeIfPresent(Bool.self, forKey: .confirmTools) ?? true
     }
 
     public var runsInTerminal: Bool { kind != .api }

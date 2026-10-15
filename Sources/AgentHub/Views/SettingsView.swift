@@ -118,6 +118,8 @@ private struct AgentEditor: View {
             TextField("Name", text: $draft.name)
             TextField("Handle (for @mentions)", text: $draft.handle)
             TextField("SF Symbol", text: $draft.symbol)
+            TextField("What it's good at (used by auto-routing)", text: $draft.summary, axis: .vertical)
+                .lineLimit(1...3)
             Picker("Kind", selection: $draft.kind) {
                 Text("Terminal agent").tag(AgentKind.cli)
                 Text("API model").tag(AgentKind.api)
@@ -132,6 +134,9 @@ private struct AgentEditor: View {
                 TextField("Base URL (optional for Anthropic/OpenAI)", text: optional($draft.baseURL))
                 TextField("System prompt", text: optional($draft.systemPrompt), axis: .vertical)
                     .lineLimit(3...6)
+                Toggle("Let the model use shared MCP tools", isOn: $draft.useTools)
+                Toggle("Ask before each tool call", isOn: $draft.confirmTools)
+                    .disabled(!draft.useTools)
             } else {
                 TextField("Command (empty = login shell)", text: $draft.command)
                 LabeledContent("Arguments (one per line)") {
@@ -376,18 +381,85 @@ private struct APIKeySettings: View {
 
 private struct GeneralSettings: View {
     @Environment(AppState.self) private var state
+    @State private var directory = ""
+    @State private var routerModel = ""
+    @State private var confirmClear = false
 
     var body: some View {
         Form {
-            TextField("Default working directory", text: Binding(
-                get: { state.config.defaultWorkingDirectory ?? "" },
-                set: { value in state.updateConfig { $0.defaultWorkingDirectory = value.isEmpty ? nil : value } }
-            ))
-            Text("Terminal agents start in this directory unless the agent or the new-session sheet sets one.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            Section("Sessions") {
+                HStack {
+                    TextField("Default working directory", text: $directory)
+                        .onSubmit(saveDirectory)
+                    Button("Save", action: saveDirectory)
+                }
+                Text("Terminal agents start in this directory unless the agent or the new-session sheet sets one.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Auto-routing") {
+                Toggle("Route messages without an @mention to the best agent", isOn: Binding(
+                    get: { state.config.autoRoute },
+                    set: { value in state.updateConfig { $0.autoRoute = value } }
+                ))
+                Picker("Router", selection: Binding(
+                    get: { state.config.routerAgentID ?? AgentPresets.claudeAPI.id },
+                    set: { value in state.updateConfig { $0.routerAgentID = value } }
+                )) {
+                    ForEach(state.config.agents.filter { $0.kind == .api }) { agent in
+                        Text(agent.name).tag(agent.id)
+                    }
+                }
+                HStack {
+                    TextField("Router model (empty = fast default)", text: $routerModel)
+                        .onSubmit(saveRouterModel)
+                    Button("Save", action: saveRouterModel)
+                }
+                Text("Applies when no session is selected. With an Anthropic router the default model is \(AutoRouter.defaultAnthropicModel).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Usage") {
+                Toggle("Read Claude Code and Codex logs for the usage dashboard", isOn: Binding(
+                    get: { state.config.scanAgentLogs },
+                    set: { value in
+                        state.updateConfig { $0.scanAgentLogs = value }
+                        state.refreshUsage()
+                    }
+                ))
+            }
+
+            Section("History") {
+                HStack {
+                    Text("\(state.closedHistory.count) saved sessions")
+                    Spacer()
+                    Button("Clear History…", role: .destructive) { confirmClear = true }
+                        .disabled(state.closedHistory.isEmpty)
+                }
+            }
         }
         .formStyle(.grouped)
+        .onAppear {
+            directory = state.config.defaultWorkingDirectory ?? ""
+            routerModel = state.config.routerModel ?? ""
+        }
+        .confirmationDialog("Delete all saved sessions?", isPresented: $confirmClear) {
+            Button("Delete All", role: .destructive) { state.clearHistory() }
+        } message: {
+            Text("Open sessions are kept. This can't be undone.")
+        }
+    }
+
+    private func saveDirectory() {
+        let value = directory.trimmingCharacters(in: .whitespaces)
+        state.updateConfig { $0.defaultWorkingDirectory = value.isEmpty ? nil : value }
+    }
+
+    private func saveRouterModel() {
+        let value = routerModel.trimmingCharacters(in: .whitespaces)
+        state.updateConfig { $0.routerModel = value.isEmpty ? nil : value }
     }
 }
 

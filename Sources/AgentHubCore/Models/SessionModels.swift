@@ -22,19 +22,44 @@ public enum SessionStatus: String, Codable, CaseIterable, Sendable {
 }
 
 public enum ChatRole: String, Codable, Sendable {
-    case system, user, assistant
+    case system, user, assistant, tool
 }
 
+/// Where a tool call shown in a chat stands.
+public enum ToolCallState: String, Codable, Sendable {
+    case awaitingApproval, running, succeeded, failed, denied
+}
+
+/// One item in a chat as the user sees it. The provider-native transcript is
+/// kept separately; this is for display and history.
 public struct ChatMessage: Identifiable, Codable, Hashable, Sendable {
     public var id: UUID
     public var role: ChatRole
     public var text: String
     public var date: Date
+    // Tool calls (role == .tool)
+    public var toolName: String?
+    public var toolCallID: String?
+    public var toolArguments: String?
+    public var toolState: ToolCallState?
 
-    public init(id: UUID = UUID(), role: ChatRole, text: String, date: Date = Date()) {
+    public init(
+        id: UUID = UUID(),
+        role: ChatRole,
+        text: String,
+        date: Date = Date(),
+        toolName: String? = nil,
+        toolCallID: String? = nil,
+        toolArguments: String? = nil,
+        toolState: ToolCallState? = nil
+    ) {
         self.id = id
         self.role = role
         self.text = text
         self.date = date
+        self.toolName = toolName
+        self.toolCallID = toolCallID
+        self.toolArguments = toolArguments
+        self.toolState = toolState
     }
 }
