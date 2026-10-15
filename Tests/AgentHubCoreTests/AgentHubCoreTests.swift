@@ -651,7 +651,8 @@ final class ConversationTests: XCTestCase {
         XCTAssertEqual(ConversationContext.prompt(task: "more", for: AgentPresets.claudeCode.id, in: conversation), "more")
 
         // Once seen, it isn't repeated.
-        conversation.updateParticipant(AgentPresets.codex.id) { $0.seenEntryCount = conversation.entries.count }
+        let count = conversation.entries.count
+        conversation.updateParticipant(AgentPresets.codex.id) { $0.seenEntryCount = count }
         XCTAssertEqual(ConversationContext.prompt(task: "next", for: AgentPresets.codex.id, in: conversation), "next")
     }
 

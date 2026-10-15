@@ -1,20 +1,14 @@
 # Agent Hub
 
-A native macOS app that gives you one command line for all your AI agents.
+A native macOS command center for your AI agents, with a chat interface on top.
 
-- **Terminal agents**: Claude Code, Codex CLI, Gemini CLI, Aider, or any command you register. Each runs in its own live terminal tab.
-- **API models**: chat with Claude, OpenAI, or any OpenAI-compatible server (Ollama, LM Studio, OpenRouter, ...) using your own keys.
-- **Shared MCP servers**: set up MCP servers once and they're passed to every agent that supports it.
-- **MCP tools for API models**: API chats can call your shared MCP servers' tools, with an Allow/Deny prompt for each call.
-- **One command bar** for all of them:
-  - `@claude @codex fix the failing tests` starts a session on each agent with that task.
-  - `@all run the test suite again` sends the text to every live session.
-  - Plain text goes to the selected session.
-  - With no session selected, plain text is **auto-routed**: a fast model picks the best agent for the task.
-- **Token usage dashboard**: tokens per day, per agent and per model, with estimated cost. Covers the app's own API chats exactly, plus Claude Code and Codex usage read from their local logs.
-- **Session history**: sessions are saved. Continue an old chat, or re-run a terminal session with the same task and folder.
-- **Split view**: up to four sessions side by side (`⌘D` adds the current session).
-- **Task board**: every session grouped by *Running*, *Needs input*, *Done*, *Failed*, with a macOS notification when an agent finishes or goes quiet.
+- **Chat with any agent.** Type `@claude fix the flaky tests` or `@claude @codex each review this module` and the agents' replies, tool steps, file edits, and token counts stream in as cards. Follow-ups continue the same agent session, and agents see what the other agents in the chat said.
+- **Works with the agents you already use.** Claude Code and Codex run headless in the chat (`claude -p --output-format stream-json`, `codex exec --json`). Gemini CLI, Aider, and your own scripts show live output. `@shell <command>` runs a command. API models (Claude, OpenAI, OpenAI-compatible) chat directly with your keys.
+- **Terminals when you want them.** Open any agent in a real terminal, or click *Open in Terminal* on a chat reply to continue that exact session interactively. Up to four terminals can sit side by side.
+- **Shared MCP servers.** Set them up once; Claude Code, Codex, and API models all get them. API models ask before each tool call.
+- **Auto-routing.** Describe a task without an `@mention` and a fast model picks the agent.
+- **Usage tracking.** A dashboard plus a **menu bar widget** with today's tokens, estimated cost, a 7-day sparkline, live runs, and a quick-ask box. Counts API chats exactly and reads Claude Code / Codex usage from their logs.
+- **Mission Control.** Every run and terminal grouped by *Running*, *Needs input*, *Done*, *Failed*, with notifications.
 
 ## Requirements
 
@@ -37,17 +31,34 @@ To work in Xcode, open `Package.swift` and run the `AgentHub` scheme.
 
 | Action | How |
 | --- | --- |
-| Start agents on a task | `⌘K`, or type `@handle task` in the command bar |
-| Message the current session | Type in the command bar and press Return |
-| Broadcast to every live session | `@all your message` |
-| Task board | `⇧⌘B`, or *Task Board* in the sidebar |
+| New chat | `⌘N` |
+| Ask an agent | Type `@handle task` in the chat box. `⏎` sends, `⇧⏎` adds a line, `Tab` completes a mention |
+| Follow up | Type without a mention; it goes to the agent you addressed last |
+| Everyone in the chat | `@all your message` |
+| Set the folder agents work in | The folder chip at the top of a chat |
+| Open an agent in a terminal | `⌘K`, the terminal icon next to an agent, or *Open in Terminal* on a reply |
+| Mission Control | `⇧⌘B` |
 | Usage dashboard | `⇧⌘U`, or *Usage* in the sidebar |
-| Add/remove current session from split view | `⌘D`, or right-click a session |
-| Reopen a past session | Click it under *History* in the sidebar |
+| Add/remove a terminal from split view | `⌘D`, or right-click it |
+| Menu bar widget | Click the ✦ icon in the menu bar (toggle in Settings → General) |
 | Close a session | `⇧⌘W` or right-click it in the sidebar |
 | Agents, MCP servers, API keys | `⌘,` (Settings) |
 
 Built-in handles: `@claude`, `@codex`, `@gemini`, `@aider`, `@claude-api`, `@openai`, `@shell`. You can add, edit, or remove agents in Settings.
+
+### What agents may do from chat
+
+When a terminal agent runs from chat it can't ask you for permission, so each agent has a setting (Settings → Agents → *When asked from chat*):
+
+| Setting | Claude Code | Codex |
+| --- | --- | --- |
+| Read only | `--permission-mode default` (edits and commands are refused) | `--sandbox read-only` |
+| Edit files in the folder (default) | `--permission-mode acceptEdits` | `--sandbox workspace-write` |
+| Full access | `--dangerously-skip-permissions` | `--dangerously-bypass-approvals-and-sandbox` |
+
+Use *Full access* only for folders you trust. For anything that needs case-by-case approval, use *Open in Terminal*.
+
+Chat mode needs a recent Codex CLI (one that supports `codex exec --json`).
 
 ### How terminal agents are started
 
