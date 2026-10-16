@@ -109,8 +109,7 @@ struct SidebarView: View {
             .scrollIndicators(.never)
         }
         .padding(.top, 34) // room for the window's traffic lights
-        .background(Theme.void.opacity(0.55))
-        .background(.ultraThinMaterial.opacity(0.4))
+        .background(Theme.void.opacity(0.6))
     }
 
     private var activeCount: Int {

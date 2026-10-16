@@ -9,15 +9,51 @@ public struct LoggedUsage: Hashable, Sendable {
 }
 
 enum LogDates {
+    // Formatters are expensive to create; parsing with a shared one is thread-safe.
+    private static let withFraction: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    private static let plain: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+
     static func parse(_ text: String?) -> Date? {
         guard let text else { return nil }
-        let withFraction = ISO8601DateFormatter()
-        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = withFraction.date(from: text) { return date }
-        let plain = ISO8601DateFormatter()
-        plain.formatOptions = [.withInternetDateTime]
-        return plain.date(from: text)
+        return withFraction.date(from: text) ?? plain.date(from: text)
     }
+}
+
+/// Calls `body` with each line of a file, reading it in 1 MB chunks so large
+/// logs never have to fit in memory at once.
+enum LineReader {
+    static func forEachLine(in url: URL, _ body: (Data) -> Void) {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return }
+        defer { try? handle.close() }
+        var buffer = Data()
+        while let chunk = try? handle.read(upToCount: 1 << 20), !chunk.isEmpty {
+            buffer.append(chunk)
+            var start = buffer.startIndex
+            while let newline = buffer[start...].firstIndex(of: UInt8(ascii: "\n")) {
+                if newline > start { body(Data(buffer[start..<newline])) }
+                start = buffer.index(after: newline)
+            }
+            buffer = Data(buffer[start...])
+        }
+        if !buffer.isEmpty { body(buffer) }
+    }
+
+    static func lines(of contents: String) -> [Data] {
+        contents.split(separator: "\n", omittingEmptySubsequences: true).map { Data($0.utf8) }
+    }
+}
+
+private extension Data {
+    func contains(_ text: String) -> Bool { range(of: Data(text.utf8)) != nil }
 }
 
 /// Reads token usage from Claude Code's session transcripts
@@ -29,39 +65,69 @@ enum LogDates {
 public enum ClaudeCodeLogParser {
     public static let source = "Claude Code"
 
-    public static func parse(_ contents: String) -> [LoggedUsage] {
-        var results: [LoggedUsage] = []
-        var seen = Set<String>()
-        for line in contents.split(separator: "\n", omittingEmptySubsequences: true) {
-            // Cheap filter before JSON parsing: most lines aren't usage lines.
-            guard line.contains("\"usage\""), let json = try? JSONValue.parse(String(line)) else { continue }
-            guard json["type"]?.stringValue == "assistant",
-                  let message = json["message"],
-                  let usageJSON = message["usage"],
-                  let model = message["model"]?.stringValue, model != "<synthetic>",
-                  let date = LogDates.parse(json["timestamp"]?.stringValue)
-            else { continue }
+    /// Only the fields needed; the decoder skips everything else on the line.
+    private struct Line: Decodable {
+        struct Usage: Decodable {
+            let input_tokens: Int?
+            let output_tokens: Int?
+            let cache_read_input_tokens: Int?
+            let cache_creation_input_tokens: Int?
+        }
+        struct Message: Decodable {
+            let id: String?
+            let model: String?
+            let usage: Usage?
+        }
+        let type: String?
+        let timestamp: String?
+        let requestId: String?
+        let message: Message?
+    }
+
+    struct Accumulator {
+        private(set) var results: [LoggedUsage] = []
+        private var seen = Set<String>()
+        private let decoder = JSONDecoder()
+
+        mutating func consume(_ line: Data) {
+            // Cheap byte checks first: most lines (user turns, tool output) have no usage.
+            guard line.contains("\"usage\""), line.contains("\"assistant\""),
+                  let entry = try? decoder.decode(Line.self, from: line),
+                  entry.type == "assistant",
+                  let message = entry.message,
+                  let usageJSON = message.usage,
+                  let model = message.model, model != "<synthetic>",
+                  let date = LogDates.parse(entry.timestamp)
+            else { return }
 
             let usage = TokenUsage(
-                input: usageJSON["input_tokens"]?.intValue ?? 0,
-                output: usageJSON["output_tokens"]?.intValue ?? 0,
-                cacheRead: usageJSON["cache_read_input_tokens"]?.intValue ?? 0,
-                cacheWrite: usageJSON["cache_creation_input_tokens"]?.intValue ?? 0
+                input: usageJSON.input_tokens ?? 0,
+                output: usageJSON.output_tokens ?? 0,
+                cacheRead: usageJSON.cache_read_input_tokens ?? 0,
+                cacheWrite: usageJSON.cache_creation_input_tokens ?? 0
             )
-            guard !usage.isEmpty else { continue }
+            guard !usage.isEmpty else { return }
 
             var key: String?
-            if let messageID = message["id"]?.stringValue {
-                key = messageID + ":" + (json["requestId"]?.stringValue ?? "")
-                if seen.contains(key!) { continue }
-                seen.insert(key!)
+            if let messageID = message.id {
+                let id = messageID + ":" + (entry.requestId ?? "")
+                guard seen.insert(id).inserted else { return }
+                key = id
             }
-            results.append(LoggedUsage(
-                dedupKey: key,
-                record: UsageRecord(source: source, model: model, date: date, usage: usage)
-            ))
+            results.append(LoggedUsage(dedupKey: key, record: UsageRecord(source: source, model: model, date: date, usage: usage)))
         }
-        return results
+    }
+
+    public static func parse(_ contents: String) -> [LoggedUsage] {
+        var accumulator = Accumulator()
+        LineReader.lines(of: contents).forEach { accumulator.consume($0) }
+        return accumulator.results
+    }
+
+    static func parse(file: URL) -> [LoggedUsage] {
+        var accumulator = Accumulator()
+        LineReader.forEachLine(in: file) { accumulator.consume($0) }
+        return accumulator.results
     }
 }
 
@@ -74,29 +140,37 @@ public enum ClaudeCodeLogParser {
 public enum CodexLogParser {
     public static let source = "Codex"
 
-    public static func parse(_ contents: String, fileKey: String = "") -> [LoggedUsage] {
-        var results: [LoggedUsage] = []
-        var model = "gpt-5"
-        var previous: TokenUsage?
-        var eventIndex = 0
+    struct Accumulator {
+        let fileKey: String
+        private(set) var results: [LoggedUsage] = []
+        private var model = "gpt-5"
+        private var previous: TokenUsage?
+        private var eventIndex = 0
 
-        for line in contents.split(separator: "\n", omittingEmptySubsequences: true) {
-            guard let json = try? JSONValue.parse(String(line)) else { continue }
+        init(fileKey: String) {
+            self.fileKey = fileKey
+        }
+
+        mutating func consume(_ line: Data) {
+            // Only model changes and token counts matter.
+            let isContext = line.contains("\"turn_context\"")
+            guard isContext || line.contains("\"token_count\""),
+                  let json = try? JSONValue.parse(line) else { return }
             let payload = json["payload"]
 
             if let newModel = payload?["model"]?.stringValue, !newModel.isEmpty {
                 model = newModel
-                continue
+                return
             }
             guard json["type"]?.stringValue == "event_msg",
                   payload?["type"]?.stringValue == "token_count",
                   let info = payload?["info"], !info.isNull,
                   let date = LogDates.parse(json["timestamp"]?.stringValue)
-            else { continue }
+            else { return }
 
             let delta: TokenUsage
             if let totalJSON = info["total_token_usage"] {
-                let total = codexUsage(totalJSON)
+                let total = CodexLogParser.codexUsage(totalJSON)
                 if let previous, total.total >= previous.total {
                     delta = TokenUsage(
                         input: total.input - previous.input,
@@ -108,23 +182,34 @@ public enum CodexLogParser {
                     delta = total
                 } else {
                     // Counter went backwards (new conversation in the same file).
-                    delta = info["last_token_usage"].map(codexUsage) ?? total
+                    delta = info["last_token_usage"].map(CodexLogParser.codexUsage) ?? total
                 }
                 previous = total
             } else if let last = info["last_token_usage"] {
-                delta = codexUsage(last)
+                delta = CodexLogParser.codexUsage(last)
             } else {
-                continue
+                return
             }
 
             eventIndex += 1
-            guard !delta.isEmpty, delta.input >= 0, delta.output >= 0, delta.cacheRead >= 0 else { continue }
+            guard !delta.isEmpty, delta.input >= 0, delta.output >= 0, delta.cacheRead >= 0 else { return }
             results.append(LoggedUsage(
                 dedupKey: fileKey.isEmpty ? nil : "\(fileKey)#\(eventIndex)",
                 record: UsageRecord(source: source, model: model, date: date, usage: delta)
             ))
         }
-        return results
+    }
+
+    public static func parse(_ contents: String, fileKey: String = "") -> [LoggedUsage] {
+        var accumulator = Accumulator(fileKey: fileKey)
+        LineReader.lines(of: contents).forEach { accumulator.consume($0) }
+        return accumulator.results
+    }
+
+    static func parse(file: URL) -> [LoggedUsage] {
+        var accumulator = Accumulator(fileKey: file.path)
+        LineReader.forEachLine(in: file) { accumulator.consume($0) }
+        return accumulator.results
     }
 
     /// Codex counts cached tokens inside `input_tokens`; split them out.
@@ -189,12 +274,12 @@ public final class AgentLogScanner: @unchecked Sendable {
         var visited = Set<String>()
         for root in roots.claudeProjects {
             for file in jsonlFiles(under: root, modifiedSince: since) where visited.insert(file.path).inserted {
-                all += cached(file) { ClaudeCodeLogParser.parse($0) }
+                all += cached(file) { ClaudeCodeLogParser.parse(file: $0) }
             }
         }
         for root in roots.codexSessions {
             for file in jsonlFiles(under: root, modifiedSince: since) where visited.insert(file.path).inserted {
-                all += cached(file) { CodexLogParser.parse($0, fileKey: file.path) }
+                all += cached(file) { CodexLogParser.parse(file: $0) }
             }
         }
 
@@ -207,7 +292,7 @@ public final class AgentLogScanner: @unchecked Sendable {
         }
     }
 
-    private func cached(_ file: URL, parse: (String) -> [LoggedUsage]) -> [LoggedUsage] {
+    private func cached(_ file: URL, parse: (URL) -> [LoggedUsage]) -> [LoggedUsage] {
         let values = try? file.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
         let modified = values?.contentModificationDate ?? .distantPast
         let size = values?.fileSize ?? 0
@@ -217,8 +302,7 @@ public final class AgentLogScanner: @unchecked Sendable {
         lock.unlock()
         if let hit, hit.modified == modified, hit.size == size { return hit.usage }
 
-        guard let data = try? Data(contentsOf: file) else { return [] }
-        let usage = parse(String(decoding: data, as: UTF8.self))
+        let usage = parse(file)
         lock.lock()
         cache[file.path] = CacheEntry(modified: modified, size: size, usage: usage)
         lock.unlock()

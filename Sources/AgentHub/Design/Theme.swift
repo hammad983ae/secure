@@ -70,31 +70,30 @@ enum AgentColors {
 
 // MARK: - Surfaces
 
-/// Frosted glass card with a hairline border.
+/// Glass-style card: a translucent tinted fill with a hairline border.
+///
+/// Deliberately not a system material: materials re-blur everything behind
+/// them on every frame, which gets expensive with dozens of cards on screen.
 struct GlassCard: ViewModifier {
     var radius: CGFloat = Theme.radius
     var tint: Color? = nil
     var glow: Bool = false
 
     func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
         content
-            .background {
-                RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .fill(.ultraThinMaterial)
-                    .opacity(0.55)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: radius, style: .continuous)
-                            .fill(LinearGradient(colors: [(tint ?? .white).opacity(0.10), Theme.surface], startPoint: .topLeading, endPoint: .bottomTrailing))
-                    )
-            }
-            .overlay(
-                RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .strokeBorder(
-                        LinearGradient(colors: [(tint ?? .white).opacity(glow ? 0.55 : 0.18), Theme.stroke], startPoint: .topLeading, endPoint: .bottomTrailing),
-                        lineWidth: 1
-                    )
+            .background(
+                shape.fill(LinearGradient(
+                    colors: [(tint ?? .white).opacity(0.09), Color.white.opacity(0.035)],
+                    startPoint: .topLeading, endPoint: .bottomTrailing
+                ))
             )
-            .shadow(color: (tint ?? .clear).opacity(glow ? 0.35 : 0), radius: 18)
+            .overlay(
+                shape.strokeBorder(
+                    LinearGradient(colors: [(tint ?? .white).opacity(glow ? 0.6 : 0.18), Theme.stroke], startPoint: .topLeading, endPoint: .bottomTrailing),
+                    lineWidth: 1
+                )
+            )
     }
 }
 
@@ -113,57 +112,43 @@ extension View {
     }
 }
 
-/// Slowly drifting aurora behind the whole window.
+/// Static aurora behind the whole window: soft color glows and a dot grid,
+/// drawn once (and again only on resize). No animation, no blur filters.
 struct AuroraBackground: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1 / 20, paused: reduceMotion)) { timeline in
-            let t = reduceMotion ? 0 : timeline.date.timeIntervalSinceReferenceDate / 14
-            GeometryReader { geo in
-                let w = geo.size.width, h = geo.size.height
-                ZStack {
-                    LinearGradient(colors: [Theme.void, Theme.deep], startPoint: .top, endPoint: .bottom)
-                    blob(Theme.violet, size: max(w, h) * 0.75)
-                        .position(x: w * (0.25 + 0.08 * sin(t)), y: h * (0.15 + 0.06 * cos(t * 0.8)))
-                    blob(Theme.cyan, size: max(w, h) * 0.6)
-                        .position(x: w * (0.85 + 0.06 * cos(t * 1.1)), y: h * (0.75 + 0.07 * sin(t * 0.9)))
-                    blob(Theme.magenta, size: max(w, h) * 0.45)
-                        .position(x: w * (0.6 + 0.1 * sin(t * 0.6)), y: h * (0.05 + 0.05 * sin(t * 1.3)))
-                        .opacity(0.6)
-                    GridPattern().opacity(0.5)
-                }
+        Canvas(rendersAsynchronously: true) { context, size in
+            let rect = CGRect(origin: .zero, size: size)
+            context.fill(Path(rect), with: .linearGradient(
+                Gradient(colors: [Theme.void, Theme.deep]),
+                startPoint: .zero, endPoint: CGPoint(x: 0, y: size.height)
+            ))
+            let glows: [(Color, CGPoint, CGFloat, Double)] = [
+                (Theme.violet, CGPoint(x: size.width * 0.25, y: size.height * 0.15), max(size.width, size.height) * 0.45, 0.20),
+                (Theme.cyan, CGPoint(x: size.width * 0.85, y: size.height * 0.78), max(size.width, size.height) * 0.38, 0.16),
+                (Theme.magenta, CGPoint(x: size.width * 0.62, y: size.height * 0.02), max(size.width, size.height) * 0.28, 0.12),
+            ]
+            for (color, center, radius, strength) in glows {
+                context.fill(Path(rect), with: .radialGradient(
+                    Gradient(colors: [color.opacity(strength), color.opacity(0)]),
+                    center: center, startRadius: 0, endRadius: radius
+                ))
             }
-        }
-        .ignoresSafeArea()
-    }
-
-    private func blob(_ color: Color, size: CGFloat) -> some View {
-        Circle()
-            .fill(RadialGradient(colors: [color.opacity(0.22), color.opacity(0)], center: .center, startRadius: 0, endRadius: size / 2))
-            .frame(width: size, height: size)
-            .blur(radius: 40)
-    }
-}
-
-/// Faint dot grid for a "HUD" texture.
-struct GridPattern: View {
-    var body: some View {
-        Canvas { context, size in
+            // Dot grid
             let spacing: CGFloat = 28
-            var path = Path()
+            var dots = Path()
             var x: CGFloat = 0
             while x < size.width {
                 var y: CGFloat = 0
                 while y < size.height {
-                    path.addEllipse(in: CGRect(x: x, y: y, width: 1.2, height: 1.2))
+                    dots.addRect(CGRect(x: x, y: y, width: 1.2, height: 1.2))
                     y += spacing
                 }
                 x += spacing
             }
-            context.fill(path, with: .color(.white.opacity(0.05)))
+            context.fill(dots, with: .color(.white.opacity(0.03)))
         }
         .allowsHitTesting(false)
+        .ignoresSafeArea()
     }
 }
 
@@ -186,7 +171,7 @@ struct AgentAvatar: View {
                 .foregroundStyle(.white)
         }
         .frame(width: size, height: size)
-        .shadow(color: color.opacity(active ? 0.8 : 0.35), radius: active ? 10 : 4)
+        .shadow(color: color.opacity(active ? 0.7 : 0), radius: active ? 6 : 0)
         .overlay {
             if active { PulseRing(color: color).frame(width: size + 8, height: size + 8) }
         }
@@ -219,7 +204,7 @@ struct StatusBadge: View {
             Circle()
                 .fill(status.color)
                 .frame(width: 6, height: 6)
-                .shadow(color: status.color, radius: status == .running ? 4 : 2)
+
             if !compact {
                 Text(status.title).font(Theme.label).tracking(1).textCase(.uppercase)
             }

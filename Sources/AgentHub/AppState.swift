@@ -47,6 +47,10 @@ final class ConversationModel: Identifiable {
     var tasks: [UUID: Task<Void, Never>] = [:]
     /// Run id → the assistant message currently receiving streamed text.
     var openBubbles: [UUID: UUID] = [:]
+    /// Streamed text not yet shown, by run id. Flushed a few times a second so
+    /// the chat isn't re-rendered for every token.
+    @ObservationIgnored var pendingText: [UUID: String] = [:]
+    @ObservationIgnored var flushScheduled = false
     var unread = false
 
     init(_ conversation: Conversation) {
@@ -97,6 +101,10 @@ final class AppState {
     private(set) var apiUsage: [UsageRecord] = []
     /// Usage read from Claude Code and Codex logs.
     private(set) var logUsage: [UsageRecord] = []
+    /// Bumped whenever usage records change; summaries are cached per version.
+    private var usageVersion = 0
+    @ObservationIgnored private var summaryCache: [Date: UsageSummary] = [:]
+    @ObservationIgnored private var summaryCacheVersion = -1
     private(set) var isScanningUsage = false
     private(set) var lastUsageScan: Date?
 
@@ -135,7 +143,7 @@ final class AppState {
             refreshInstalledAgents()
             refreshUsage()
             // Keep the menu bar figures current even when no window is open.
-            refreshTimer = Timer.scheduledTimer(withTimeInterval: 120, repeats: true) { [weak self] _ in
+            refreshTimer = Timer.scheduledTimer(withTimeInterval: 600, repeats: true) { [weak self] _ in
                 MainActor.assumeIsolated { self?.refreshUsage() }
             }
         }
@@ -399,7 +407,22 @@ final class AppState {
         }
     }
 
+    /// Moves buffered streamed text into the visible messages.
+    private func flushText(in model: ConversationModel) {
+        model.flushScheduled = false
+        let pending = model.pendingText
+        guard !pending.isEmpty else { return }
+        model.pendingText.removeAll()
+        for (runID, text) in pending {
+            guard let bubble = model.openBubbles[runID] else { continue }
+            model.conversation.updateRun(runID) { run in
+                if let index = run.messages.lastIndex(where: { $0.id == bubble }) { run.messages[index].text += text }
+            }
+        }
+    }
+
     private func finishRun(_ runID: UUID, failed: Bool, in model: ConversationModel) {
+        flushText(in: model)
         model.tasks[runID] = nil
         model.openBubbles[runID] = nil
         var finished: AgentRun?
@@ -456,11 +479,18 @@ final class AppState {
     // MARK: Run events
 
     private func handle(_ event: RunnerEvent, runID: UUID, agent: AgentDefinition, in model: ConversationModel) {
-        if case .turnFinished = event { model.openBubbles[runID] = nil }
+        if case .turnFinished = event {
+            flushText(in: model)
+            model.openBubbles[runID] = nil
+        }
         if case let .text(text) = event {
-            if let bubble = model.openBubbles[runID] {
-                model.conversation.updateRun(runID) { run in
-                    if let index = run.messages.lastIndex(where: { $0.id == bubble }) { run.messages[index].text += text }
+            if model.openBubbles[runID] != nil {
+                model.pendingText[runID, default: ""] += text
+                if !model.flushScheduled {
+                    model.flushScheduled = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+                        MainActor.assumeIsolated { self?.flushText(in: model) }
+                    }
                 }
             } else {
                 let message = ChatMessage(role: .assistant, text: text)
@@ -773,7 +803,7 @@ final class AppState {
     /// Re-reads Claude Code and Codex logs from the last 31 days.
     func refreshUsage() {
         guard !isDemo else { return }
-        guard config.scanAgentLogs else { logUsage = []; return }
+        guard config.scanAgentLogs else { logUsage = []; usageVersion += 1; return }
         guard !isScanningUsage else { return }
         isScanningUsage = true
         let scanner = logScanner
@@ -781,13 +811,24 @@ final class AppState {
         Task {
             let records = await Task.detached(priority: .utility) { scanner.scan(since: since) }.value
             logUsage = records
+            usageVersion += 1
             isScanningUsage = false
             lastUsageScan = Date()
         }
     }
 
+    /// Totals since `start`. Cached until the usage records change, because
+    /// views (sidebar, menu bar) ask for this on every redraw.
     func usageSummary(since start: Date) -> UsageSummary {
-        UsageSummary(records: allUsage, from: start)
+        let version = usageVersion // registers the observation dependency
+        if summaryCacheVersion != version {
+            summaryCache.removeAll()
+            summaryCacheVersion = version
+        }
+        if let cached = summaryCache[start] { return cached }
+        let summary = UsageSummary(records: allUsage, from: start)
+        summaryCache[start] = summary
+        return summary
     }
 
     var todaySummary: UsageSummary {
@@ -797,6 +838,7 @@ final class AppState {
     private func recordUsage(_ usage: TokenUsage, model: String, source: String) {
         let record = UsageRecord(source: source, model: model, date: Date(), usage: usage)
         apiUsage.append(record)
+        usageVersion += 1
         if !isDemo { try? usageStore.append(record) }
     }
 
@@ -804,6 +846,7 @@ final class AppState {
     func seedDemo(conversations: [Conversation], usage: [UsageRecord]) {
         self.conversations = conversations.map(ConversationModel.init)
         apiUsage = usage
+        usageVersion += 1
         lastUsageScan = Date()
     }
 

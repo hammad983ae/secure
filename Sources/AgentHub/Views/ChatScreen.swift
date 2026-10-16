@@ -157,7 +157,9 @@ struct ChatWelcome: View {
         VStack(spacing: 26) {
             Spacer()
             ZStack {
-                Circle().fill(Theme.accentWide).frame(width: 74, height: 74).blur(radius: 26).opacity(0.7)
+                Circle()
+                    .fill(RadialGradient(colors: [Theme.violet.opacity(0.55), Theme.violet.opacity(0)], center: .center, startRadius: 20, endRadius: 70))
+                    .frame(width: 140, height: 140)
                 Image(systemName: "sparkles")
                     .font(.system(size: 34, weight: .semibold))
                     .foregroundStyle(.white)

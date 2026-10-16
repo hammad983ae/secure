@@ -5,9 +5,14 @@ import SwiftTerm
 /// Terminal view that reports output so the hub can track agent activity.
 final class HubTerminalView: LocalProcessTerminalView {
     var onOutput: (() -> Void)?
+    private var lastNotified = Date.distantPast
 
     override func dataReceived(slice: ArraySlice<UInt8>) {
         super.dataReceived(slice: slice)
+        // Busy agents print thousands of chunks a second; status only needs a few updates.
+        let now = Date()
+        guard now.timeIntervalSince(lastNotified) > 0.25 else { return }
+        lastNotified = now
         onOutput?()
     }
 }

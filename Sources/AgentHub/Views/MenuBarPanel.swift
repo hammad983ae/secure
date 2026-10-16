@@ -106,8 +106,8 @@ struct MenuBarPanel: View {
         .background(
             ZStack {
                 LinearGradient(colors: [Theme.void, Theme.deep], startPoint: .top, endPoint: .bottom)
-                Circle().fill(Theme.violet.opacity(0.25)).frame(width: 260).blur(radius: 60).offset(x: -100, y: -120)
-                Circle().fill(Theme.cyan.opacity(0.18)).frame(width: 220).blur(radius: 60).offset(x: 120, y: 140)
+                RadialGradient(colors: [Theme.violet.opacity(0.22), .clear], center: .topLeading, startRadius: 0, endRadius: 260)
+                RadialGradient(colors: [Theme.cyan.opacity(0.15), .clear], center: .bottomTrailing, startRadius: 0, endRadius: 240)
             }
         )
         .preferredColorScheme(.dark)
