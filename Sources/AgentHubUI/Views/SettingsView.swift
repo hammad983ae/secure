@@ -15,10 +15,14 @@ struct SettingsView: View {
                 .tabItem { Label("Budgets", systemImage: "gauge.with.dots.needle.67percent") }
             PromptSettings()
                 .tabItem { Label("Prompts", systemImage: "text.badge.star") }
+            ScheduleSettings()
+                .tabItem { Label("Schedules", systemImage: "calendar.badge.clock") }
+            RemoteSettings()
+                .tabItem { Label("Remote", systemImage: "iphone.radiowaves.left.and.right") }
             GeneralSettings()
                 .tabItem { Label("General", systemImage: "gearshape") }
         }
-        .frame(width: 720, height: 560)
+        .frame(width: 760, height: 580)
     }
 }
 
