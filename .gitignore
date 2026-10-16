@@ -10,3 +10,7 @@ App/AgentHub/Info.plist
 App/AgentHub/AgentHub.entitlements
 App/Widget/Info.plist
 App/Widget/AgentHubWidget.entitlements
+branch_structure.json
+temp_auto_push.bat
+temp_interactive_push.bat
+.gitignore
