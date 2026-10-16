@@ -45,6 +45,11 @@ public struct HubConfiguration: Codable, Equatable, Sendable {
     public var accent: AccentPalette
     /// ⌥Space opens a quick prompt from any app.
     public var globalHotKey: Bool
+    /// Messages sent to agents on a schedule.
+    public var schedules: [ScheduledTask]
+    /// Serve the phone page on the local network (off by default).
+    public var remoteAccess: Bool
+    public var remotePort: Int
 
     public init(
         agents: [AgentDefinition] = AgentPresets.all,
@@ -59,7 +64,10 @@ public struct HubConfiguration: Codable, Equatable, Sendable {
         prompts: [SavedPrompt] = SavedPrompt.defaults,
         appearance: AppearanceMode = .dark,
         accent: AccentPalette = .neon,
-        globalHotKey: Bool = true
+        globalHotKey: Bool = true,
+        schedules: [ScheduledTask] = [],
+        remoteAccess: Bool = false,
+        remotePort: Int = HubConfiguration.defaultRemotePort
     ) {
         self.agents = agents
         self.mcpServers = mcpServers
@@ -75,11 +83,17 @@ public struct HubConfiguration: Codable, Equatable, Sendable {
         self.appearance = appearance
         self.accent = accent
         self.globalHotKey = globalHotKey
+        self.schedules = schedules
+        self.remoteAccess = remoteAccess
+        self.remotePort = remotePort
     }
+
+    public static let defaultRemotePort = 47823
 
     private enum CodingKeys: String, CodingKey {
         case agents, mcpServers, defaultWorkingDirectory, autoRoute, routerAgentID, routerModel, scanAgentLogs
         case hasHeadlessSettings, showMenuBarWidget, budgets, prompts, appearance, accent, globalHotKey
+        case schedules, remoteAccess, remotePort
     }
 
     public init(from decoder: Decoder) throws {
@@ -98,6 +112,9 @@ public struct HubConfiguration: Codable, Equatable, Sendable {
         appearance = try c.decodeIfPresent(AppearanceMode.self, forKey: .appearance) ?? .dark
         accent = try c.decodeIfPresent(AccentPalette.self, forKey: .accent) ?? .neon
         globalHotKey = try c.decodeIfPresent(Bool.self, forKey: .globalHotKey) ?? true
+        schedules = try c.decodeIfPresent([ScheduledTask].self, forKey: .schedules) ?? []
+        remoteAccess = try c.decodeIfPresent(Bool.self, forKey: .remoteAccess) ?? false
+        remotePort = try c.decodeIfPresent(Int.self, forKey: .remotePort) ?? HubConfiguration.defaultRemotePort
     }
 
     /// The agent used for auto-routing, with the router model applied.
