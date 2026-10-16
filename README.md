@@ -8,6 +8,10 @@ A native macOS command center for your AI agents, with a chat interface on top.
 - **Shared MCP servers.** Set them up once; Claude Code, Codex, and API models all get them. API models ask before each tool call.
 - **Auto-routing.** Describe a task without an `@mention` and a fast model picks the agent.
 - **Usage tracking.** A dashboard plus a **menu bar widget** with today's tokens, estimated cost, a 7-day sparkline, live runs, and a quick-ask box. Counts API chats exactly and reads Claude Code / Codex usage from their logs.
+- **Diff review and undo.** When an agent edits files in a git folder, its reply shows exactly what changed, file by file, with **Keep** and **Undo**.
+- **Budgets.** Daily or monthly token or dollar limits per agent, with alerts at 80% and 100% and an optional hard stop.
+- **Prompt library.** `/review`, `/tests`, `/explain`, `/fix`, or your own saved prompts, sent to their default agents.
+- **Desktop widget.** Today's tokens and cost, the last 7 days, running agents, and budgets on your desktop or in Notification Center.
 - **Mission Control.** Every run and terminal grouped by *Running*, *Needs input*, *Done*, *Failed*, with notifications.
 
 ## Requirements
@@ -18,14 +22,22 @@ A native macOS command center for your AI agents, with a chat interface on top.
 
 ## Build and run
 
+**The full app (recommended):** a real `Agent Hub.app` with an icon, the desktop widget, launch at login, and notifications.
+
 ```bash
-swift run AgentHub            # quick dev run
-swift test                    # core library tests
-./scripts/bundle.sh           # builds build/AgentHub.app (needed for notifications)
-open build/AgentHub.app
+./App/make-project.sh        # installs XcodeGen if needed, generates and opens App/AgentHub.xcodeproj
 ```
 
-To work in Xcode, open `Package.swift` and run the `AgentHub` scheme.
+In Xcode, pick the **AgentHub** scheme and press ⌘R. To install it, use *Product → Archive* or copy `Agent Hub.app` from the build folder into `/Applications`.
+
+To add the widget: run the app once, then right-click the desktop → *Edit Widgets…* (or open Notification Center) and search for **Agent Hub**. If it doesn't show up, set your Apple ID team for both targets under *Signing & Capabilities* and run again.
+
+**Quick dev run (no Xcode project):**
+
+```bash
+swift run AgentHub            # no widget, notifications, or launch at login
+swift test                    # core library tests
+```
 
 ## Using it
 
@@ -40,6 +52,8 @@ To work in Xcode, open `Package.swift` and run the `AgentHub` scheme.
 | Mission Control | `⇧⌘B` |
 | Usage dashboard | `⇧⌘U`, or *Usage* in the sidebar |
 | Add/remove a terminal from split view | `⌘D`, or right-click it |
+| Run a saved prompt | Type `/` in the chat box, e.g. `/review` or `/tests the cart module` |
+| Budgets, prompts | Settings → Budgets, Settings → Prompts |
 | Menu bar widget | Click the ✦ icon in the menu bar (toggle in Settings → General) |
 | Close a session | `⇧⌘W` or right-click it in the sidebar |
 | Agents, MCP servers, API keys | `⌘,` (Settings) |
@@ -59,6 +73,23 @@ When a terminal agent runs from chat it can't ask you for permission, so each ag
 Use *Full access* only for folders you trust. For anything that needs case-by-case approval, use *Open in Terminal*.
 
 Chat mode needs a recent Codex CLI (one that supports `codex exec --json`).
+
+### Diff review and undo
+
+When a chat run uses a folder inside a git repository, Agent Hub snapshots the working tree just before and after the run. It writes git tree objects through a temporary index, so your staging area, branches, and stash are never touched. The reply card then lists every file the agent added, changed, or deleted, with an expandable diff.
+
+- **Keep** just marks the changes as reviewed.
+- **Undo** puts modified and deleted files back as they were before the run, and deletes files the run created. If you (or another agent) edited those files again after the run, it asks first.
+
+If two agents work in the same folder at the same time, each run's diff includes the other's edits, so review those together.
+
+### Budgets
+
+Settings → Budgets: pick an agent (or all agents), daily or monthly, and a limit in estimated dollars or tokens. At 80% you get a notification and the menu bar icon shows a warning with the percentage; at 100% another notification. With **Hard stop**, Agent Hub won't start new runs for that agent until the period resets. Budgets count the same usage as the dashboard, including Claude Code and Codex runs outside Agent Hub, but can only stop runs started from Agent Hub.
+
+### Prompt library
+
+Type `/` in the chat box to see saved prompts. `{input}` in a prompt is replaced by whatever you type after the command (`/tests the cart module`); without it, your text is added at the end. If your message doesn't mention an agent, the prompt's default agents get it, and `/review @codex` sends it to Codex instead. Edit prompts in Settings → Prompts.
 
 ### How terminal agents are started
 
@@ -112,9 +143,12 @@ Sources/AgentHubCore/     Platform-independent logic (unit tested)
   Routing/                @mention parsing and auto-routing
   API/                    Streaming, tool-use loop for Anthropic and OpenAI-style APIs
   MCP/                    MCP client (stdio + Streamable HTTP) and toolbox
-  Usage/                  Token counting, pricing, Claude Code / Codex log parsers
+  Usage/                  Token counting, pricing, log parsers, budgets, saved prompts
+  Git/                    Working-tree snapshots, diffs, and undo
   Storage/                Config, session history, usage log
-Sources/AgentHub/         macOS app (SwiftUI + SwiftTerm)
+Sources/AgentHubUI/       macOS app UI and state (SwiftUI + SwiftTerm)
+Sources/AgentHub/         `swift run` entry point
+App/                      Xcode project (XcodeGen project.yml), app icon, widget extension
 Tests/AgentHubCoreTests/  Unit tests for the core
 ```
 
