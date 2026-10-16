@@ -157,8 +157,15 @@ final class AppState {
     // MARK: Configuration
 
     func updateConfig(_ change: (inout HubConfiguration) -> Void) {
+        var updated = config
+        change(&updated)
+        // No-op writes must not touch observed state: SwiftUI bindings (like the
+        // menu bar item's) can write back their current value during updates,
+        // and reacting to that re-renders the scene, which writes again.
+        guard updated != config else { return }
         let oldServers = config.mcpServers
-        change(&config)
+        let oldAgents = config.agents
+        config = updated
         if !isDemo {
             do {
                 try store.save(config)
@@ -170,14 +177,15 @@ final class AppState {
             toolbox = nil
             Task { await old.shutdown() }
         }
-        refreshInstalledAgents()
+        if config.agents != oldAgents { refreshInstalledAgents() }
     }
 
     func refreshInstalledAgents() {
         guard !isDemo else { return }
         let commands = config.agents.filter(\.runsInTerminal).map(\.command)
         Task {
-            installedCommands = await AgentAvailability.installed(commands)
+            let found = await AgentAvailability.installed(commands)
+            if found != installedCommands { installedCommands = found }
         }
     }
 

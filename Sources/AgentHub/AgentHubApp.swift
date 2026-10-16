@@ -44,7 +44,10 @@ struct AgentHubApp: App {
 
         MenuBarExtra(isInserted: Binding(
             get: { state.config.showMenuBarWidget && !Snapshot.isRequested },
-            set: { value in state.updateConfig { $0.showMenuBarWidget = value } }
+            set: { value in
+                guard !Snapshot.isRequested, value != state.config.showMenuBarWidget else { return }
+                state.updateConfig { $0.showMenuBarWidget = value }
+            }
         )) {
             MenuBarPanel()
                 .environment(state)
