@@ -20,6 +20,8 @@ A native macOS command center for your AI agents, with a chat interface on top.
 - **Quick prompt.** `⌥Space` from any app opens a floating prompt that starts a new chat.
 - **Light and dark themes** plus five accent palettes (Settings → General).
 - **Export** a chat as Markdown, to a file or the clipboard.
+- **Scheduled tasks.** `/schedule every weekday at 9 @codex run the tests and summarize failures`. Each schedule posts to its own chat and notifies you when the agents finish.
+- **Remote access from your phone.** Scan a QR code and watch live runs, approve tool calls, stop runs, and send messages from your phone's browser.
 - **Mission Control.** Every run and terminal grouped by *Running*, *Needs input*, *Done*, *Failed*, with notifications.
 
 ## Requirements
@@ -65,6 +67,8 @@ swift test                    # core library tests
 | Quick prompt from any app | `⌥Space` (turn off in Settings → General) |
 | Export a chat | The share button in the chat header → *Save as Markdown…* or *Copy as Markdown* |
 | Theme and accent color | Settings → General → Appearance |
+| Schedule a task | `/schedule every morning at 9 @codex run the tests`, or Settings → Schedules |
+| Use from your phone | Settings → Remote → turn on, then scan the QR code |
 | Mission Control | `⇧⌘B` |
 | Usage dashboard | `⇧⌘U`, or *Usage* in the sidebar |
 | Add/remove a terminal from split view | `⌘D`, or right-click it |
@@ -116,6 +120,31 @@ Separate steps with `→` (or `->`, `=>`), and start every step with an agent me
 `/compare @a @b task` sends the same task to each agent. In a git folder, each terminal agent gets its own worktree, a separate checkout in `~/Library/Application Support/AgentHub/worktrees/` that starts from your current files, uncommitted changes included. The agents can't step on each other, and the results show side by side with duration, tokens, cost, and files changed (the fastest and cheapest are highlighted). **Pick this** applies the chosen agent's changes to your folder as a patch and deletes the other worktrees. API models don't edit files, so picking one just marks it and continues the chat with that agent.
 
 Turn on the branch toggle in a chat's header to give every terminal agent its own worktree for all messages, not just comparisons. The bar under the header lists each worktree with **Apply** (patch your folder, then remove the worktree), **Discard**, and a button to show it in Finder. If the patch doesn't apply cleanly because your folder changed in the meantime, nothing is changed and the worktree stays for you to look at. Worktrees don't create branches or commits in your repository. Agent sessions are tied to a folder, so an agent starts a fresh session when it moves into or out of a worktree.
+
+### Scheduled tasks
+
+Type `/schedule <when> <message>` in any chat, or add one in Settings → Schedules. The message is anything you'd type in a chat: mentions, `@all`, pipelines, or saved prompts. The folder comes from the chat you typed it in (or the one you pick in Settings).
+
+Ways to say when: `every day at 9`, `every morning at 9:30`, `every evening at 7` (19:00), `every weekday at 6pm`, `every monday at 14:00`, `daily at 8am`, `every 2 hours`, `every 30 minutes`, `hourly`.
+
+Each schedule has its own chat named ⏰ plus the schedule's name, so follow-ups keep the context. You get a notification when the agents finish. Schedules run while Agent Hub is open, and it keeps running in the menu bar after you close the window. If the Mac was asleep or the app was closed at the scheduled time, the task runs once as soon as it can, not once per missed time. If the previous run is still going, that run is skipped. Settings → Schedules has **Run Now**, an on/off switch, and the next and last run times. Turn on *Launch at Login* (Settings → General) so schedules survive a restart.
+
+### Remote access from your phone
+
+Settings → Remote → turn on *Let my phone watch and control Agent Hub*, then scan the QR code with your phone on the same Wi-Fi. The page that opens shows every chat with live replies, tool steps, output, and token counts, refreshing every two seconds. From there you can:
+
+- **Allow** or **Deny** tool calls from API agents that ask first. Claude Code and Codex can't ask for permission in chat mode (see above), so there's nothing to approve for them.
+- **Stop** a chat's runs.
+- **Send** messages to an open chat or start a new one, including mentions, pipelines, `/compare`, `/schedule`, and saved prompts.
+
+Add the page to your home screen (Share → Add to Home Screen) for an app-like icon.
+
+Security:
+
+- The QR code's link carries a random 256-bit pairing key, kept in your Keychain. The key sits after `#` in the link, so the browser keeps it on the phone and sends it only in an `Authorization` header. Every API call needs it, and repeated wrong keys get locked out for a minute.
+- Anyone with the link can control your agents. **New Pairing Code** signs out every paired phone.
+- It's plain HTTP on your local network (port 47823 by default), so use it on networks you trust. macOS may ask to allow incoming connections the first time.
+- To use it away from home, put the Mac and phone on a private network such as [Tailscale](https://tailscale.com) and open the link with the Mac's Tailscale address (`http://100.x.y.z:47823/#token=…`). Don't forward the port on your router.
 
 ### How terminal agents are started
 
@@ -172,6 +201,8 @@ Sources/AgentHubCore/     Platform-independent logic (unit tested)
   Usage/                  Token counting, pricing, log parsers, budgets, saved prompts
   Git/                    Working-tree snapshots, diffs, undo, and worktrees
   Conversation/           Chats, context sharing, pipelines, search, export, attachments
+  Scheduling/             Schedule rules, plain-English parsing, due checks
+  Remote/                 HTTP parsing, pairing tokens, phone snapshot, phone web page
   Storage/                Config, session history, usage log
 Sources/AgentHubUI/       macOS app UI and state (SwiftUI + SwiftTerm)
 Sources/AgentHub/         `swift run` entry point

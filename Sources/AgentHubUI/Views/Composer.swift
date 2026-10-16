@@ -18,8 +18,14 @@ struct Composer: View {
         name: "compare", title: "Run agents side by side and pick the best", body: ""
     )
 
+    /// Built-in `/schedule`.
+    static let schedulePrompt = SavedPrompt(
+        id: UUID(uuidString: "5A7ED000-0000-4000-8000-0000000000C1")!,
+        name: "schedule", title: "Run on a schedule, e.g. every weekday at 9 @codex …", body: ""
+    )
+
     private var promptSuggestions: [SavedPrompt] {
-        PromptLibrary.completions(for: text, prompts: [Self.comparePrompt] + state.config.prompts)
+        PromptLibrary.completions(for: text, prompts: [Self.comparePrompt, Self.schedulePrompt] + state.config.prompts)
     }
 
     private var suggestions: [AgentDefinition] {

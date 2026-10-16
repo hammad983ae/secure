@@ -917,3 +917,108 @@ final class ChatToolsTests: XCTestCase {
         XCTAssertNil(conversation.participants[0].worktreePath)
     }
 }
+
+final class AutomationTests: XCTestCase {
+    var calendar: Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        return calendar
+    }
+
+    func date(_ text: String) -> Date {
+        let formatter = ISO8601DateFormatter()
+        return formatter.date(from: text)!
+    }
+
+    func testScheduleParsing() {
+        let weekday = ScheduleParser.parse("every weekday at 9 @codex run the tests")
+        XCTAssertEqual(weekday?.rule, .weekdays(hour: 9, minute: 0))
+        XCTAssertEqual(weekday?.message, "@codex run the tests")
+
+        XCTAssertEqual(ScheduleParser.parse("every morning at 9:30 @claude hi")?.rule, .daily(hour: 9, minute: 30))
+        XCTAssertEqual(ScheduleParser.parse("every evening at 7 @claude hi")?.rule, .daily(hour: 19, minute: 0))
+        XCTAssertEqual(ScheduleParser.parse("every day at 6pm @claude hi")?.rule, .daily(hour: 18, minute: 0))
+        XCTAssertEqual(ScheduleParser.parse("every day at 12 am @claude hi")?.rule, .daily(hour: 0, minute: 0))
+        XCTAssertEqual(ScheduleParser.parse("daily at 8am @claude hi")?.rule, .daily(hour: 8, minute: 0))
+        XCTAssertEqual(ScheduleParser.parse("every monday at 14:30 @claude hi")?.rule, .weekly(weekday: 2, hour: 14, minute: 30))
+        XCTAssertEqual(ScheduleParser.parse("every 2 hours @claude hi")?.rule, .interval(minutes: 120))
+        XCTAssertEqual(ScheduleParser.parse("every 15 minutes @claude hi")?.rule, .interval(minutes: 15))
+        XCTAssertEqual(ScheduleParser.parse("hourly @claude hi")?.rule, .interval(minutes: 60))
+        XCTAssertEqual(ScheduleParser.parse("every day @claude hi")?.rule, .daily(hour: 9, minute: 0))
+        XCTAssertNil(ScheduleParser.parse("@claude every day"))
+        XCTAssertNil(ScheduleParser.parse("every blursday at 9"))
+        XCTAssertNil(ScheduleParser.parse("every day at 25"))
+    }
+
+    func testNextFire() {
+        let friday = date("2026-10-16T10:00:00Z") // a Friday
+        XCTAssertEqual(ScheduleRule.daily(hour: 9, minute: 0).nextFire(after: friday, calendar: calendar), date("2026-10-17T09:00:00Z"))
+        XCTAssertEqual(ScheduleRule.weekdays(hour: 9, minute: 0).nextFire(after: friday, calendar: calendar), date("2026-10-19T09:00:00Z"))
+        XCTAssertEqual(ScheduleRule.weekly(weekday: 4, hour: 8, minute: 15).nextFire(after: friday, calendar: calendar), date("2026-10-21T08:15:00Z"))
+        XCTAssertEqual(ScheduleRule.interval(minutes: 30).nextFire(after: friday, calendar: calendar), date("2026-10-16T10:30:00Z"))
+    }
+
+    func testDueOnceAfterMissedRuns() {
+        var task = ScheduledTask(name: "t", message: "@claude hi", rule: .daily(hour: 9, minute: 0), createdAt: date("2026-10-10T12:00:00Z"))
+        let now = date("2026-10-16T12:00:00Z")
+        XCTAssertTrue(task.isDue(at: now, calendar: calendar))
+        task.lastRun = now
+        XCTAssertFalse(task.isDue(at: now.addingTimeInterval(60), calendar: calendar))
+        XCTAssertTrue(task.isDue(at: date("2026-10-17T09:00:00Z"), calendar: calendar))
+        task.enabled = false
+        XCTAssertFalse(task.isDue(at: date("2026-10-18T09:00:00Z"), calendar: calendar))
+    }
+
+    func testHTTPParsing() {
+        let raw = "POST /api/send?x=1 HTTP/1.1\r\nHost: mac.local\r\nAuthorization: Bearer abc\r\nContent-Length: 5\r\n\r\nhello"
+        guard case let .complete(request) = HTTPRequest.parse(Data(raw.utf8)) else { return XCTFail("not parsed") }
+        XCTAssertEqual(request.method, "POST")
+        XCTAssertEqual(request.path, "/api/send")
+        XCTAssertEqual(request.query["x"], "1")
+        XCTAssertEqual(request.bearerToken, "abc")
+        XCTAssertEqual(String(decoding: request.body, as: UTF8.self), "hello")
+
+        XCTAssertEqual(HTTPRequest.parse(Data(raw.dropLast(2).utf8)), .incomplete)
+        XCTAssertEqual(HTTPRequest.parse(Data("GET / HTTP/1.1\r\nHost: x".utf8)), .incomplete)
+        XCTAssertEqual(HTTPRequest.parse(Data("NONSENSE\r\n\r\n".utf8)), .invalid)
+
+        let response = String(decoding: HTTPResponse.error(401, "no").serialized(), as: UTF8.self)
+        XCTAssertTrue(response.hasPrefix("HTTP/1.1 401 Unauthorized\r\n"))
+        XCTAssertTrue(response.contains("Cache-Control: no-store"))
+    }
+
+    func testRemoteAuth() {
+        let token = RemoteAuth.makeToken()
+        XCTAssertGreaterThanOrEqual(token.count, 43)
+        XCTAssertNotEqual(token, RemoteAuth.makeToken())
+        XCTAssertTrue(RemoteAuth.matches(token, token))
+        XCTAssertFalse(RemoteAuth.matches(String(token.dropLast()), token))
+        XCTAssertFalse(RemoteAuth.matches(token + "x", token))
+        XCTAssertFalse(RemoteAuth.matches(nil, token))
+        XCTAssertFalse(RemoteAuth.matches("", ""))
+    }
+
+    func testRemoteSnapshot() {
+        var conversation = Conversation(title: "Fix tests")
+        conversation.entries.append(.user("@claude fix"))
+        var run = AgentRun(agent: AgentPresets.claudeAPI)
+        run.messages = [
+            ChatMessage(role: .assistant, text: String(repeating: "a", count: 5000)),
+            ChatMessage(role: .tool, text: "", toolName: "fs__read", toolCallID: "1", toolArguments: "{}", toolState: .awaitingApproval),
+        ]
+        conversation.entries.append(.run(run))
+        let snapshot = RemoteSnapshot.make(conversations: [conversation, Conversation()], agents: ["claude"], host: "Mac")
+        XCTAssertEqual(snapshot.chats.count, 1)
+        XCTAssertTrue(snapshot.chats[0].busy)
+        XCTAssertTrue(snapshot.chats[0].needsApproval)
+        XCTAssertEqual(snapshot.chats[0].entries[1].run?.messages[0].text.count, 4001)
+        XCTAssertEqual(snapshot.chats[0].entries[1].run?.messages[1].state, "awaitingApproval")
+    }
+
+    func testOldConfigDecodesWithoutAutomation() throws {
+        let config = try JSONDecoder().decode(HubConfiguration.self, from: Data("{}".utf8))
+        XCTAssertTrue(config.schedules.isEmpty)
+        XCTAssertFalse(config.remoteAccess)
+        XCTAssertEqual(config.remotePort, HubConfiguration.defaultRemotePort)
+    }
+}

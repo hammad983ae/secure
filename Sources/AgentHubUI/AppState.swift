@@ -2,6 +2,7 @@ import AgentHubCore
 import AppKit
 import Foundation
 import Observation
+import SystemConfiguration
 import WidgetKit
 
 /// A live interactive terminal running an agent.
@@ -125,6 +126,13 @@ final class AppState {
     /// Opens a main window (set by a view that has SwiftUI's `openWindow`).
     @ObservationIgnored var openMainWindow: (() -> Void)?
     @ObservationIgnored private var quickPrompt: QuickPromptController?
+    @ObservationIgnored private var scheduleTimer: Timer?
+    @ObservationIgnored private var remoteServer: RemoteServer?
+    @ObservationIgnored private var remoteServerPort: Int?
+    @ObservationIgnored private var remoteFailures: [Date] = []
+    /// nil while stopped or running fine; an error message if the server couldn't start.
+    private(set) var remoteError: String?
+    private(set) var remoteToken: String = ""
 
     init(demo: Bool = false) {
         isDemo = demo
@@ -161,6 +169,11 @@ final class AppState {
             refreshTimer = Timer.scheduledTimer(withTimeInterval: 600, repeats: true) { [weak self] _ in
                 MainActor.assumeIsolated { self?.refreshUsage() }
             }
+            scheduleTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.runDueSchedules() }
+            }
+            remoteToken = KeychainStore.read(account: Self.remoteTokenAccount) ?? ""
+            updateRemoteServer()
         }
         applyAppearance()
         if !demo { updateHotKey() }
@@ -196,7 +209,10 @@ final class AppState {
         }
         if config.agents != oldAgents { refreshInstalledAgents() }
         applyAppearance()
-        if !isDemo { updateHotKey() }
+        if !isDemo {
+            updateHotKey()
+            updateRemoteServer()
+        }
     }
 
     // MARK: Appearance and quick prompt
@@ -333,6 +349,10 @@ final class AppState {
         notice = nil
         let handles = Set(chatAgents.map { $0.handle.lowercased() })
 
+        if let rest = Self.dropCommand("schedule", from: text) {
+            addSchedule(from: rest, in: model)
+            return
+        }
         var compare = false
         if let rest = Self.dropCommand("compare", from: text) {
             compare = true
@@ -1014,6 +1034,172 @@ final class AppState {
     private func persist(_ model: ConversationModel) {
         guard !isDemo, !model.conversation.entries.isEmpty else { return }
         try? conversationStore.save(model.conversation)
+    }
+
+    // MARK: Scheduled tasks
+
+    /// Runs every enabled schedule whose time has come. A run missed while
+    /// the Mac slept or the app was closed happens once, on the next check.
+    func runDueSchedules(now: Date = Date()) {
+        guard !isDemo else { return }
+        for task in config.schedules where task.isDue(at: now) {
+            runSchedule(task.id, now: now)
+        }
+    }
+
+    /// Sends a scheduled task's message into its chat now.
+    func runSchedule(_ id: UUID, now: Date = Date()) {
+        guard let task = config.schedules.first(where: { $0.id == id }) else { return }
+        let model: ConversationModel
+        if let existing = task.conversationID.flatMap(conversation(id:)) {
+            model = existing
+        } else {
+            model = ConversationModel(Conversation(
+                title: "⏰ \(task.name)",
+                workingDirectory: nonEmpty(task.workingDirectory) ?? config.defaultWorkingDirectory
+            ))
+            conversations.append(model)
+        }
+        updateConfig { config in
+            guard let index = config.schedules.firstIndex(where: { $0.id == id }) else { return }
+            config.schedules[index].lastRun = now
+            config.schedules[index].conversationID = model.id
+        }
+        if model.isBusy {
+            Notifier.post(title: "Skipped “\(task.name)”", body: "The previous run is still going.")
+            return
+        }
+        send(task.message, in: model)
+        model.conversation.title = "⏰ \(task.name)"
+        if selectedConversation?.id != model.id { model.unread = true }
+        persist(model)
+    }
+
+    /// `/schedule every weekday at 9 @codex run the tests` from a chat.
+    private func addSchedule(from text: String, in model: ConversationModel) {
+        let usage = "Try: /schedule every weekday at 9 @codex run the tests and summarize failures"
+        guard let parsed = ScheduleParser.parse(text) else {
+            notice = "Couldn't read the schedule. \(usage)"
+            return
+        }
+        let message = parsed.message.trimmingCharacters(in: .whitespacesAndNewlines)
+        let handles = Set(chatAgents.map { $0.handle.lowercased() })
+        let mentions = CommandParser.chatCommand(message, knownHandles: handles).mentions
+        guard !message.isEmpty, !mentions.isEmpty || PipelineParser.parse(message, knownHandles: handles) != nil else {
+            notice = "Say which agent should do it. \(usage)"
+            return
+        }
+        let task = ScheduledTask(
+            name: Conversation.title(from: CommandParser.chatCommand(message, knownHandles: handles).task),
+            message: message,
+            rule: parsed.rule,
+            workingDirectory: nonEmpty(model.conversation.workingDirectory)
+        )
+        updateConfig { $0.schedules.append(task) }
+        let next = task.nextRun().map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "—"
+        notice = "Scheduled: \(parsed.rule.summary.lowercased()). Next run \(next). Results go to a “⏰ \(task.name)” chat. Manage in Settings → Schedules."
+    }
+
+    // MARK: Remote access
+
+    static let remoteTokenAccount = "remote-access-token"
+
+    /// The links that pair a phone, one per network address.
+    var remotePairingLinks: [String] {
+        guard !remoteToken.isEmpty else { return [] }
+        let port = config.remotePort
+        var hosts = RemoteServer.localAddresses()
+        if let name = SCDynamicStoreCopyLocalHostName(nil) as String?, !name.isEmpty {
+            hosts.append("\(name).local")
+        }
+        return hosts.map { "http://\($0):\(port)/#token=\(remoteToken)" }
+    }
+
+    var isRemoteRunning: Bool { remoteServer != nil && remoteError == nil }
+
+    /// Makes a new pairing token; phones paired with the old one stop working.
+    func resetRemoteToken() {
+        remoteToken = RemoteAuth.makeToken()
+        KeychainStore.write(account: Self.remoteTokenAccount, value: remoteToken)
+    }
+
+    private func updateRemoteServer() {
+        guard !isDemo else { return }
+        let wanted = config.remoteAccess ? config.remotePort : nil
+        guard wanted != remoteServerPort else { return }
+        remoteServer?.stop()
+        remoteServer = nil
+        remoteServerPort = nil
+        remoteError = nil
+        guard let port = wanted else { return }
+        if remoteToken.isEmpty { resetRemoteToken() }
+        do {
+            let server = try RemoteServer(port: port) { [weak self] request in
+                await self?.handleRemote(request) ?? .error(503, "Agent Hub is shutting down.")
+            }
+            server.start { [weak self] error in
+                Task { @MainActor in self?.remoteError = error }
+            }
+            remoteServer = server
+            remoteServerPort = port
+        } catch {
+            remoteError = error.localizedDescription
+        }
+    }
+
+    private func handleRemote(_ request: HTTPRequest) -> HTTPResponse {
+        if request.method == "GET", request.path == "/" || request.path == "/index.html" {
+            return HTTPResponse(status: 200, contentType: "text/html; charset=utf-8", body: Data(RemoteWebPage.html.utf8))
+        }
+        guard request.path.hasPrefix("/api/") else { return .error(404, "Not found") }
+
+        // Slow down token guessing: after 10 bad tokens in a minute, refuse for a while.
+        let now = Date()
+        remoteFailures.removeAll { now.timeIntervalSince($0) > 60 }
+        guard remoteFailures.count < 10 else { return .error(429, "Too many attempts. Try again in a minute.") }
+        guard RemoteAuth.matches(request.bearerToken, remoteToken) else {
+            remoteFailures.append(now)
+            return .error(401, "Not paired")
+        }
+
+        let decoder = JSONDecoder()
+        switch (request.method, request.path) {
+        case ("GET", "/api/state"):
+            let host = (SCDynamicStoreCopyComputerName(nil, nil) as String?) ?? "Mac"
+            return .json(RemoteSnapshot.make(conversations: conversations.map(\.conversation),
+                                              agents: chatAgents.map(\.handle), host: host))
+        case ("POST", "/api/approve"):
+            guard let body = try? decoder.decode(RemoteCommand.Approve.self, from: request.body) else { return .error(400, "Bad request") }
+            resolveApproval(messageID: body.messageID, approved: body.approved)
+            return .json(["ok": true])
+        case ("POST", "/api/stop"):
+            guard let body = try? decoder.decode(RemoteCommand.Stop.self, from: request.body),
+                  let model = conversation(id: body.chatID) else { return .error(400, "Bad request") }
+            if let runID = body.runID { stop(runID: runID, in: model) } else { stopAll(in: model) }
+            return .json(["ok": true])
+        case ("POST", "/api/send"):
+            guard let body = try? decoder.decode(RemoteCommand.Send.self, from: request.body),
+                  !body.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .error(400, "Bad request") }
+            let model: ConversationModel
+            if let id = body.chatID {
+                guard let existing = conversation(id: id) else { return .error(404, "That chat is gone.") }
+                model = existing
+            } else {
+                model = ConversationModel(Conversation(workingDirectory: config.defaultWorkingDirectory))
+                conversations.append(model)
+            }
+            notice = nil
+            send(body.text, in: model)
+            if model.conversation.entries.isEmpty {
+                conversations.removeAll { $0.id == model.id }
+                return .error(400, notice ?? "Mention an agent, like @claude.")
+            }
+            // Explain when nothing started (no agent mentioned, budget used up…).
+            let problem = model.isBusy || isRouting ? "" : (notice ?? "")
+            return .json(["chatID": model.id.uuidString, "notice": problem])
+        default:
+            return .error(404, "Not found")
+        }
     }
 
     // MARK: Terminals
