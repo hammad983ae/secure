@@ -1,5 +1,24 @@
 import Foundation
 
+public enum AppearanceMode: String, Codable, CaseIterable, Sendable {
+    case dark, light, system
+    public var title: String { rawValue.capitalized }
+}
+
+/// Accent color pairs for the UI.
+public enum AccentPalette: String, Codable, CaseIterable, Sendable {
+    case neon, sunset, aurora, ocean, mono
+    public var title: String {
+        switch self {
+        case .neon: return "Neon (cyan → violet)"
+        case .sunset: return "Sunset (amber → pink)"
+        case .aurora: return "Aurora (green → teal)"
+        case .ocean: return "Ocean (blue → indigo)"
+        case .mono: return "Mono (silver)"
+        }
+    }
+}
+
 /// The user's persisted configuration: agents, shared MCP servers, and options.
 /// API keys are deliberately not stored here (the app keeps them in the Keychain).
 public struct HubConfiguration: Codable, Equatable, Sendable {
@@ -22,6 +41,10 @@ public struct HubConfiguration: Codable, Equatable, Sendable {
     public var budgets: [Budget]
     /// Saved prompts, run with `/name` in chat.
     public var prompts: [SavedPrompt]
+    public var appearance: AppearanceMode
+    public var accent: AccentPalette
+    /// ⌥Space opens a quick prompt from any app.
+    public var globalHotKey: Bool
 
     public init(
         agents: [AgentDefinition] = AgentPresets.all,
@@ -33,7 +56,10 @@ public struct HubConfiguration: Codable, Equatable, Sendable {
         scanAgentLogs: Bool = true,
         showMenuBarWidget: Bool = true,
         budgets: [Budget] = [],
-        prompts: [SavedPrompt] = SavedPrompt.defaults
+        prompts: [SavedPrompt] = SavedPrompt.defaults,
+        appearance: AppearanceMode = .dark,
+        accent: AccentPalette = .neon,
+        globalHotKey: Bool = true
     ) {
         self.agents = agents
         self.mcpServers = mcpServers
@@ -46,11 +72,14 @@ public struct HubConfiguration: Codable, Equatable, Sendable {
         self.showMenuBarWidget = showMenuBarWidget
         self.budgets = budgets
         self.prompts = prompts
+        self.appearance = appearance
+        self.accent = accent
+        self.globalHotKey = globalHotKey
     }
 
     private enum CodingKeys: String, CodingKey {
         case agents, mcpServers, defaultWorkingDirectory, autoRoute, routerAgentID, routerModel, scanAgentLogs
-        case hasHeadlessSettings, showMenuBarWidget, budgets, prompts
+        case hasHeadlessSettings, showMenuBarWidget, budgets, prompts, appearance, accent, globalHotKey
     }
 
     public init(from decoder: Decoder) throws {
@@ -66,6 +95,9 @@ public struct HubConfiguration: Codable, Equatable, Sendable {
         showMenuBarWidget = try c.decodeIfPresent(Bool.self, forKey: .showMenuBarWidget) ?? true
         budgets = try c.decodeIfPresent([Budget].self, forKey: .budgets) ?? []
         prompts = try c.decodeIfPresent([SavedPrompt].self, forKey: .prompts) ?? SavedPrompt.defaults
+        appearance = try c.decodeIfPresent(AppearanceMode.self, forKey: .appearance) ?? .dark
+        accent = try c.decodeIfPresent(AccentPalette.self, forKey: .accent) ?? .neon
+        globalHotKey = try c.decodeIfPresent(Bool.self, forKey: .globalHotKey) ?? true
     }
 
     /// The agent used for auto-routing, with the router model applied.

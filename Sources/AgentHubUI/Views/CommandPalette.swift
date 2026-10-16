@@ -88,7 +88,6 @@ struct CommandPalette: View {
         .frame(width: 560)
         .background(LinearGradient(colors: [Theme.void, Theme.deep], startPoint: .top, endPoint: .bottom))
         .foregroundStyle(Theme.textPrimary)
-        .preferredColorScheme(.dark)
         .onAppear { directory = state.config.defaultWorkingDirectory ?? "" }
     }
 

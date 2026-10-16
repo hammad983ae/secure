@@ -801,3 +801,119 @@ final class BudgetAndPromptTests: XCTestCase {
         XCTAssertEqual(config.prompts.map(\.name), ["review", "tests", "explain", "fix"])
     }
 }
+
+final class ChatToolsTests: XCTestCase {
+    let handles: Set<String> = ["claude", "codex"]
+
+    func testPipelineParsing() {
+        let steps = PipelineParser.parse("@claude implement login → @codex review it -> @claude address the review", knownHandles: handles)
+        XCTAssertEqual(steps, [
+            PipelineStep(handle: "claude", instruction: "implement login"),
+            PipelineStep(handle: "codex", instruction: "review it"),
+            PipelineStep(handle: "claude", instruction: "address the review"),
+        ])
+        // Arrows in ordinary text don't make a pipeline.
+        XCTAssertNil(PipelineParser.parse("@claude change func f() -> Int to return 2", knownHandles: handles))
+        XCTAssertNil(PipelineParser.parse("@claude just one step", knownHandles: handles))
+        XCTAssertEqual(PipelineParser.parse("@claude write it => @codex", knownHandles: handles)?.last?.instruction,
+                       "Continue from the previous step's result.")
+    }
+
+    func testSearchFindsMessagesAndToolOutput() {
+        var conversation = Conversation(title: "Flaky tests")
+        conversation.entries.append(.user("why is the checkout test flaky?"))
+        var run = AgentRun(agent: AgentPresets.claudeCode)
+        run.messages = [
+            ChatMessage(role: .assistant, text: "The discount promise isn't awaited."),
+            ChatMessage(role: .tool, text: "FAIL payment.test.ts", toolName: "Bash", toolCallID: "1", toolArguments: "npm test", toolState: .succeeded),
+        ]
+        conversation.entries.append(.run(run))
+
+        XCTAssertEqual(ConversationSearch.search("checkout flaky", in: [conversation]).map(\.source), ["You"])
+        let tool = ConversationSearch.search("payment.test", in: [conversation])
+        XCTAssertEqual(tool.map(\.source), ["Claude Code · Bash"])
+        XCTAssertEqual(ConversationSearch.search("AWAITED", in: [conversation]).count, 1)
+        XCTAssertTrue(ConversationSearch.search("nothing-here", in: [conversation]).isEmpty)
+        XCTAssertEqual(ConversationSearch.snippet(String(repeating: "x", count: 100) + "needle", around: "needle").first, "…")
+    }
+
+    func testMarkdownExport() {
+        var conversation = Conversation(title: "Release notes")
+        conversation.entries.append(.user("@claude draft notes", attachments: ["/tmp/CHANGELOG.md"]))
+        var run = AgentRun(agent: AgentPresets.claudeCode)
+        run.pipelineStep = "1/2"
+        run.messages = [ChatMessage(role: .assistant, text: "## v2\\n- faster"), ChatMessage(role: .tool, text: "", toolName: "Read", toolArguments: "CHANGELOG.md")]
+        run.changes = RunChanges(root: "/r", before: "a", after: "b", files: [ChangedFile(path: "NOTES.md", status: .added, additions: 3, deletions: 0)], diff: "", truncated: false, state: .kept)
+        conversation.entries.append(.run(run))
+        let markdown = ConversationExporter.markdown(conversation)
+        XCTAssertTrue(markdown.hasPrefix("# Release notes"))
+        XCTAssertTrue(markdown.contains("## You\n\n@claude draft notes"))
+        XCTAssertTrue(markdown.contains("- Attached: `/tmp/CHANGELOG.md`"))
+        XCTAssertTrue(markdown.contains("## Claude Code · step 1/2"))
+        XCTAssertTrue(markdown.contains("> 🔧 `Read` CHANGELOG.md"))
+        XCTAssertTrue(markdown.contains("- `NOTES.md` A +3 −0"))
+    }
+
+    func testAttachmentsBuildProviderMessages() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("att-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let image = dir.appendingPathComponent("shot.png").path
+        let notes = dir.appendingPathComponent("notes.md").path
+        try Data([0x89, 0x50, 0x4E, 0x47]).write(to: URL(fileURLWithPath: image))
+        try "hello".write(toFile: notes, atomically: true, encoding: .utf8)
+
+        let anthropic = Attachments.userMessage(text: "look", attachments: [image, notes], provider: .anthropic)
+        XCTAssertEqual(anthropic["content"]?[0]?["type"], "image")
+        XCTAssertEqual(anthropic["content"]?[0]?["source"]?["media_type"], "image/png")
+        XCTAssertTrue(anthropic["content"]?[1]?["text"]?.stringValue?.contains("hello") == true)
+
+        let openai = Attachments.userMessage(text: "look", attachments: [image], provider: .openai)
+        XCTAssertEqual(openai["content"]?[1]?["type"], "image_url")
+        XCTAssertTrue(openai["content"]?[1]?["image_url"]?["url"]?.stringValue?.hasPrefix("data:image/png;base64,") == true)
+
+        XCTAssertEqual(Attachments.userMessage(text: "plain", attachments: [], provider: .anthropic), ChatProtocol.userMessage("plain"))
+        XCTAssertEqual(Attachments.headlessPrompt(text: "fix", attachments: ["/a.png"]), "fix\n\nAttached files (read them as needed):\n- /a.png")
+    }
+
+    func testWorktreeIsolationAndApply() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("wt-\(UUID().uuidString)").path
+        let repo = (base as NSString).appendingPathComponent("repo")
+        let worktree = (base as NSString).appendingPathComponent("worktrees/claude")
+        try FileManager.default.createDirectory(atPath: repo, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: base) }
+        func git(_ args: String...) throws { XCTAssertEqual(try GitWorkspace.run(args, in: repo).status, 0) }
+        try git("init", "-q")
+        try git("config", "user.email", "t@example.com")
+        try git("config", "user.name", "Test")
+        try "a\n".write(toFile: repo + "/f.txt", atomically: true, encoding: .utf8)
+        try git("add", ".")
+        try git("commit", "-qm", "init")
+        try "wip\n".write(toFile: repo + "/wip.txt", atomically: true, encoding: .utf8)
+
+        let start = try GitWorkspace.createWorktree(from: repo, at: worktree)
+        // The worktree has the uncommitted file too.
+        XCTAssertEqual(try String(contentsOfFile: worktree + "/wip.txt", encoding: .utf8), "wip\n")
+
+        try "a\nagent\n".write(toFile: worktree + "/f.txt", atomically: true, encoding: .utf8)
+        // The main folder is untouched until applied.
+        XCTAssertEqual(try String(contentsOfFile: repo + "/f.txt", encoding: .utf8), "a\n")
+        let changes = try XCTUnwrap(GitWorkspace.worktreeChanges(path: worktree, base: start))
+        XCTAssertEqual(changes.files.map(\.path), ["f.txt"])
+
+        try GitWorkspace.applyWorktree(path: worktree, base: start, into: repo)
+        XCTAssertEqual(try String(contentsOfFile: repo + "/f.txt", encoding: .utf8), "a\nagent\n")
+        try GitWorkspace.removeWorktree(path: worktree, root: repo)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: worktree))
+    }
+
+    func testOldConversationFilesStillDecode() throws {
+        let old = #"{"id":"6C1A0C0D-0000-4000-8000-0000000000AA","title":"t","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z","entries":[{"id":"6C1A0C0D-0000-4000-8000-0000000000AB","kind":"user","date":"2026-01-01T00:00:00Z","text":"hi"}],"participants":[{"agentID":"6C1A0C0D-0000-4000-8000-000000000001","transcript":[],"seenEntryCount":0}]}"#
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let conversation = try decoder.decode(Conversation.self, from: Data(old.utf8))
+        XCTAssertNil(conversation.isolateAgents)
+        XCTAssertNil(conversation.entries[0].attachments)
+        XCTAssertNil(conversation.participants[0].worktreePath)
+    }
+}

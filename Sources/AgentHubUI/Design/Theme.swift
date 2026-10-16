@@ -1,31 +1,86 @@
 import AgentHubCore
+import AppKit
 import SwiftUI
 
-/// Colors, type, and surfaces for Agent Hub's dark, neon-on-glass look.
+/// The accent palette in use. Set from the configuration; read by `Theme`.
+final class AccentStore: @unchecked Sendable {
+    private static let shared = AccentStore()
+    private let lock = NSLock()
+    private var palette: AccentPalette = .neon
+
+    static var current: AccentPalette {
+        get { shared.lock.withLock { shared.palette } }
+        set { shared.lock.withLock { shared.palette = newValue } }
+    }
+}
+
+extension AccentPalette {
+    var primary: NSColor { colors.0 }
+    var secondary: NSColor { colors.1 }
+    var tertiary: NSColor { colors.2 }
+
+    private var colors: (NSColor, NSColor, NSColor) {
+        switch self {
+        case .neon: return (Theme.rgb(0.13, 0.83, 0.93), Theme.rgb(0.55, 0.36, 0.96), Theme.rgb(0.93, 0.28, 0.60))
+        case .sunset: return (Theme.rgb(0.98, 0.62, 0.20), Theme.rgb(0.94, 0.30, 0.52), Theme.rgb(0.62, 0.30, 0.92))
+        case .aurora: return (Theme.rgb(0.25, 0.88, 0.55), Theme.rgb(0.10, 0.70, 0.78), Theme.rgb(0.45, 0.40, 0.95))
+        case .ocean: return (Theme.rgb(0.25, 0.62, 1.00), Theme.rgb(0.38, 0.35, 0.95), Theme.rgb(0.15, 0.80, 0.85))
+        case .mono: return (Theme.rgb(0.78, 0.80, 0.86), Theme.rgb(0.55, 0.58, 0.66), Theme.rgb(0.70, 0.72, 0.78))
+        }
+    }
+
+    /// Swatch for the settings picker.
+    var swatch: [Color] { [Color(nsColor: primary), Color(nsColor: secondary)] }
+}
+
+/// Colors, type, and surfaces for Agent Hub's neon-on-glass look, in dark
+/// and light. Neutral colors follow the window's appearance; the accent
+/// colors follow the palette picked in Settings.
 enum Theme {
     // Backgrounds
-    static let void = Color(red: 0.027, green: 0.031, blue: 0.059)        // #07080F
-    static let deep = Color(red: 0.051, green: 0.063, blue: 0.125)        // #0D1020
-    static let surface = Color.white.opacity(0.045)
-    static let surfaceRaised = Color.white.opacity(0.07)
-    static let stroke = Color.white.opacity(0.09)
-    static let strokeStrong = Color.white.opacity(0.16)
+    static let void = adaptive(dark: rgb(0.027, 0.031, 0.059), light: rgb(0.962, 0.966, 0.980))   // #07080F
+    static let deep = adaptive(dark: rgb(0.051, 0.063, 0.125), light: rgb(0.918, 0.925, 0.957))   // #0D1020
+    static let surface = adaptive(dark: NSColor.white.withAlphaComponent(0.045), light: NSColor.black.withAlphaComponent(0.035))
+    static let surfaceRaised = adaptive(dark: NSColor.white.withAlphaComponent(0.07), light: NSColor.black.withAlphaComponent(0.06))
+    static let stroke = adaptive(dark: NSColor.white.withAlphaComponent(0.09), light: NSColor.black.withAlphaComponent(0.10))
+    static let strokeStrong = adaptive(dark: NSColor.white.withAlphaComponent(0.16), light: NSColor.black.withAlphaComponent(0.18))
+    /// Base fill of glass cards.
+    static let cardBase = adaptive(dark: NSColor.white.withAlphaComponent(0.035), light: NSColor.white.withAlphaComponent(0.78))
+    /// Behind code, command output, and diffs.
+    static let codeBackground = adaptive(dark: NSColor.black.withAlphaComponent(0.35), light: NSColor.black.withAlphaComponent(0.045))
+    /// White on dark, black on light, for faint overlays.
+    static let ink = adaptive(dark: .white, light: .black)
 
     // Text
-    static let textPrimary = Color(red: 0.91, green: 0.93, blue: 0.97)
-    static let textSecondary = Color(red: 0.56, green: 0.59, blue: 0.69)
-    static let textTertiary = Color(red: 0.38, green: 0.41, blue: 0.50)
+    static let textPrimary = adaptive(dark: rgb(0.91, 0.93, 0.97), light: rgb(0.075, 0.085, 0.13))
+    static let textSecondary = adaptive(dark: rgb(0.56, 0.59, 0.69), light: rgb(0.33, 0.36, 0.45))
+    static let textTertiary = adaptive(dark: rgb(0.38, 0.41, 0.50), light: rgb(0.52, 0.55, 0.62))
 
-    // Accents
-    static let cyan = Color(red: 0.13, green: 0.83, blue: 0.93)           // #22D3EE
-    static let violet = Color(red: 0.55, green: 0.36, blue: 0.96)         // #8B5CF6
-    static let magenta = Color(red: 0.93, green: 0.28, blue: 0.60)        // #EC4899
-    static let amber = Color(red: 0.96, green: 0.62, blue: 0.04)
-    static let emerald = Color(red: 0.20, green: 0.83, blue: 0.60)
-    static let rose = Color(red: 0.96, green: 0.25, blue: 0.37)
+    // Accents (from the chosen palette; slightly deeper in light mode for contrast)
+    static var cyan: Color { accentColor(AccentStore.current.primary) }
+    static var violet: Color { accentColor(AccentStore.current.secondary) }
+    static var magenta: Color { accentColor(AccentStore.current.tertiary) }
+    static let amber = accentColor(rgb(0.96, 0.62, 0.04))
+    static let emerald = accentColor(rgb(0.20, 0.83, 0.60))
+    static let rose = accentColor(rgb(0.96, 0.25, 0.37))
 
-    static let accent = LinearGradient(colors: [cyan, violet], startPoint: .leading, endPoint: .trailing)
-    static let accentWide = LinearGradient(colors: [cyan, violet, magenta], startPoint: .topLeading, endPoint: .bottomTrailing)
+    static var accent: LinearGradient { LinearGradient(colors: [cyan, violet], startPoint: .leading, endPoint: .trailing) }
+    static var accentWide: LinearGradient { LinearGradient(colors: [cyan, violet, magenta], startPoint: .topLeading, endPoint: .bottomTrailing) }
+
+    static func rgb(_ red: CGFloat, _ green: CGFloat, _ blue: CGFloat) -> NSColor {
+        NSColor(srgbRed: red, green: green, blue: blue, alpha: 1)
+    }
+
+    /// A color that resolves per appearance (dark or light).
+    static func adaptive(dark: NSColor, light: NSColor) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
+        })
+    }
+
+    private static func accentColor(_ color: NSColor) -> Color {
+        adaptive(dark: color, light: color.blended(withFraction: 0.22, of: .black) ?? color)
+    }
 
     // Type
     static func display(_ size: CGFloat = 28) -> Font { .system(size: size, weight: .semibold, design: .rounded) }
@@ -83,14 +138,17 @@ struct GlassCard: ViewModifier {
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
         content
             .background(
-                shape.fill(LinearGradient(
-                    colors: [(tint ?? .white).opacity(0.09), Color.white.opacity(0.035)],
-                    startPoint: .topLeading, endPoint: .bottomTrailing
-                ))
+                ZStack {
+                    shape.fill(Theme.cardBase)
+                    shape.fill(LinearGradient(
+                        colors: [(tint ?? Theme.ink).opacity(0.09), .clear],
+                        startPoint: .topLeading, endPoint: .bottomTrailing
+                    ))
+                }
             )
             .overlay(
                 shape.strokeBorder(
-                    LinearGradient(colors: [(tint ?? .white).opacity(glow ? 0.6 : 0.18), Theme.stroke], startPoint: .topLeading, endPoint: .bottomTrailing),
+                    LinearGradient(colors: [(tint ?? Theme.ink).opacity(glow ? 0.6 : 0.18), Theme.stroke], startPoint: .topLeading, endPoint: .bottomTrailing),
                     lineWidth: 1
                 )
             )
@@ -145,7 +203,7 @@ struct AuroraBackground: View {
                 }
                 x += spacing
             }
-            context.fill(dots, with: .color(.white.opacity(0.03)))
+            context.fill(dots, with: .color(Theme.ink.opacity(0.035)))
         }
         .allowsHitTesting(false)
         .ignoresSafeArea()

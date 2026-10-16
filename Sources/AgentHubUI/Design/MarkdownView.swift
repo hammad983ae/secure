@@ -120,7 +120,7 @@ struct CodeBlock: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
-            .background(Color.white.opacity(0.03))
+            .background(Theme.surface)
             ScrollView(.horizontal) {
                 Text(code)
                     .font(Theme.mono)
@@ -128,7 +128,7 @@ struct CodeBlock: View {
                     .padding(12)
             }
         }
-        .background(RoundedRectangle(cornerRadius: 10).fill(Color.black.opacity(0.4)))
+        .background(RoundedRectangle(cornerRadius: 10).fill(Theme.codeBackground))
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.stroke))
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }

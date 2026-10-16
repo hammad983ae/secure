@@ -12,6 +12,14 @@ A native macOS command center for your AI agents, with a chat interface on top.
 - **Budgets.** Daily or monthly token or dollar limits per agent, with alerts at 80% and 100% and an optional hard stop.
 - **Prompt library.** `/review`, `/tests`, `/explain`, `/fix`, or your own saved prompts, sent to their default agents.
 - **Desktop widget.** Today's tokens and cost, the last 7 days, running agents, and budgets on your desktop or in Notification Center.
+- **Pipelines.** `@claude implement login → @codex review it → @claude address the review` runs each step after the previous one finishes, and each step sees the earlier replies.
+- **Compare mode.** `/compare @claude @codex fix the flaky test` runs the agents side by side, each in its own git worktree, with time, tokens, and cost per result. **Pick this** applies the winner's changes and throws the others away.
+- **Git worktrees per agent.** Turn on the branch toggle in a chat and each terminal agent works in its own worktree; apply or discard each agent's changes from the bar at the top.
+- **Search** every chat, including tool commands and output (`⇧⌘F`).
+- **Attachments.** Drop files or screenshots on the chat box, or paste them (`⇧⌘V`). API models get images and small text files inline; Claude Code and Codex get the paths.
+- **Quick prompt.** `⌥Space` from any app opens a floating prompt that starts a new chat.
+- **Light and dark themes** plus five accent palettes (Settings → General).
+- **Export** a chat as Markdown, to a file or the clipboard.
 - **Mission Control.** Every run and terminal grouped by *Running*, *Needs input*, *Done*, *Failed*, with notifications.
 
 ## Requirements
@@ -49,6 +57,14 @@ swift test                    # core library tests
 | Everyone in the chat | `@all your message` |
 | Set the folder agents work in | The folder chip at the top of a chat |
 | Open an agent in a terminal | `⌘K`, the terminal icon next to an agent, or *Open in Terminal* on a reply |
+| Pipeline | `@claude implement X → @codex review it → @claude fix what codex found` (`→`, `->`, or `=>`) |
+| Compare agents | `/compare @claude @codex task`, then **Pick this** on the best result |
+| Worktree per agent | The branch toggle in the chat header |
+| Attach files | Drop them on the chat box, the 📎 menu, or `⇧⌘V` to paste a screenshot or copied files |
+| Search all chats | `⇧⌘F`, or *Search* in the sidebar |
+| Quick prompt from any app | `⌥Space` (turn off in Settings → General) |
+| Export a chat | The share button in the chat header → *Save as Markdown…* or *Copy as Markdown* |
+| Theme and accent color | Settings → General → Appearance |
 | Mission Control | `⇧⌘B` |
 | Usage dashboard | `⇧⌘U`, or *Usage* in the sidebar |
 | Add/remove a terminal from split view | `⌘D`, or right-click it |
@@ -90,6 +106,16 @@ Settings → Budgets: pick an agent (or all agents), daily or monthly, and a lim
 ### Prompt library
 
 Type `/` in the chat box to see saved prompts. `{input}` in a prompt is replaced by whatever you type after the command (`/tests the cart module`); without it, your text is added at the end. If your message doesn't mention an agent, the prompt's default agents get it, and `/review @codex` sends it to Codex instead. Edit prompts in Settings → Prompts.
+
+### Pipelines
+
+Separate steps with `→` (or `->`, `=>`), and start every step with an agent mention. Steps run one at a time; each agent gets the earlier steps' replies as context, so "review it" means the previous step's work. A step with no text after the mention continues from the previous result. If a step fails or you press Stop, the remaining steps are skipped. Arrows inside normal text (`returns -> Int`) don't start a pipeline, because every part must begin with a mention.
+
+### Compare mode and worktrees
+
+`/compare @a @b task` sends the same task to each agent. In a git folder, each terminal agent gets its own worktree, a separate checkout in `~/Library/Application Support/AgentHub/worktrees/` that starts from your current files, uncommitted changes included. The agents can't step on each other, and the results show side by side with duration, tokens, cost, and files changed (the fastest and cheapest are highlighted). **Pick this** applies the chosen agent's changes to your folder as a patch and deletes the other worktrees. API models don't edit files, so picking one just marks it and continues the chat with that agent.
+
+Turn on the branch toggle in a chat's header to give every terminal agent its own worktree for all messages, not just comparisons. The bar under the header lists each worktree with **Apply** (patch your folder, then remove the worktree), **Discard**, and a button to show it in Finder. If the patch doesn't apply cleanly because your folder changed in the meantime, nothing is changed and the worktree stays for you to look at. Worktrees don't create branches or commits in your repository. Agent sessions are tied to a folder, so an agent starts a fresh session when it moves into or out of a worktree.
 
 ### How terminal agents are started
 
@@ -144,7 +170,8 @@ Sources/AgentHubCore/     Platform-independent logic (unit tested)
   API/                    Streaming, tool-use loop for Anthropic and OpenAI-style APIs
   MCP/                    MCP client (stdio + Streamable HTTP) and toolbox
   Usage/                  Token counting, pricing, log parsers, budgets, saved prompts
-  Git/                    Working-tree snapshots, diffs, and undo
+  Git/                    Working-tree snapshots, diffs, undo, and worktrees
+  Conversation/           Chats, context sharing, pipelines, search, export, attachments
   Storage/                Config, session history, usage log
 Sources/AgentHubUI/       macOS app UI and state (SwiftUI + SwiftTerm)
 Sources/AgentHub/         `swift run` entry point

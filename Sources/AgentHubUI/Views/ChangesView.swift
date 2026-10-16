@@ -27,7 +27,7 @@ struct ChangesView: View {
                     }
                 }
             }
-            .background(RoundedRectangle(cornerRadius: 10).fill(Color.black.opacity(0.28)))
+            .background(RoundedRectangle(cornerRadius: 10).fill(Theme.codeBackground))
             .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.stroke))
             .clipShape(RoundedRectangle(cornerRadius: 10))
             if changes.truncated {

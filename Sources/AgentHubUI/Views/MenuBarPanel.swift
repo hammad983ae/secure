@@ -6,6 +6,7 @@ import SwiftUI
 /// The menu bar item: today's tokens next to the icon.
 struct MenuBarLabel: View {
     @Environment(AppState.self) private var state
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         let today = state.todaySummary
@@ -25,6 +26,10 @@ struct MenuBarLabel: View {
                 Text(Formatters.tokens(today.total.total))
                     .monospacedDigit()
             }
+        }
+        .onAppear {
+            // Lets the ⌥Space panel reopen the main window after it was closed.
+            if state.openMainWindow == nil { state.openMainWindow = { openWindow(id: "main") } }
         }
     }
 }
@@ -129,7 +134,6 @@ struct MenuBarPanel: View {
                 RadialGradient(colors: [Theme.cyan.opacity(0.15), .clear], center: .bottomTrailing, startRadius: 0, endRadius: 240)
             }
         )
-        .preferredColorScheme(.dark)
     }
 
     private func stat(_ title: String, _ value: String, _ detail: String, _ color: Color) -> some View {
@@ -201,8 +205,8 @@ struct MenuBarPanel: View {
     }
 
     private func showMainWindow() {
-        openWindow(id: "main")
-        NSApp.activate(ignoringOtherApps: true)
+        if state.openMainWindow == nil { state.openMainWindow = { openWindow(id: "main") } }
+        state.showMainWindow()
     }
 }
 

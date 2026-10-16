@@ -131,6 +131,51 @@ public enum GitWorkspace {
         }
     }
 
+    // MARK: Worktrees
+
+    /// Creates a detached worktree at `path` holding the repository's current
+    /// files, including uncommitted and untracked ones (but not ignored ones).
+    /// Returns the tree id it started from.
+    public static func createWorktree(from root: String, at path: String) throws -> String {
+        let tree = try snapshot(root: root)
+        var commitArgs = ["commit-tree", tree, "-m", "Agent Hub worktree snapshot"]
+        if let head = try? run(["rev-parse", "--verify", "-q", "HEAD"], in: root), head.status == 0 {
+            commitArgs += ["-p", head.output.trimmingCharacters(in: .whitespacesAndNewlines)]
+        }
+        let identity = [
+            "GIT_AUTHOR_NAME": "Agent Hub", "GIT_AUTHOR_EMAIL": "agenthub@localhost",
+            "GIT_COMMITTER_NAME": "Agent Hub", "GIT_COMMITTER_EMAIL": "agenthub@localhost",
+        ]
+        let commit = try check(run(commitArgs, in: root, environment: identity), "commit-tree")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        try FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        try check(run(["worktree", "add", "--detach", path, commit], in: root), "worktree add")
+        return tree
+    }
+
+    /// Everything changed in a worktree since it was created.
+    public static func worktreeChanges(path: String, base: String) throws -> RunChanges? {
+        try changes(from: base, to: snapshot(root: path), root: path)
+    }
+
+    /// Applies a worktree's changes to the main working tree as a patch.
+    /// Fails without changing anything if the patch doesn't apply cleanly.
+    public static func applyWorktree(path: String, base: String, into root: String) throws {
+        let current = try snapshot(root: path)
+        guard current != base else { return }
+        let patch = try check(run(["diff", "--binary", "--no-color", "--no-ext-diff", base, current], in: path), "diff")
+        try check(run(["apply", "--whitespace=nowarn", "-"], in: root, input: Data(patch.utf8)), "apply")
+    }
+
+    /// Removes a worktree and its folder.
+    public static func removeWorktree(path: String, root: String) throws {
+        let result = try run(["worktree", "remove", "--force", path], in: root)
+        if result.status != 0, FileManager.default.fileExists(atPath: path) {
+            try? FileManager.default.removeItem(atPath: path)
+        }
+        _ = try? run(["worktree", "prune"], in: root)
+    }
+
     // MARK: Parsing
 
     static func parseChanges(nameStatus: String, numstat: String) -> [ChangedFile] {
@@ -169,7 +214,7 @@ public enum GitWorkspace {
         var error: String
     }
 
-    static func run(_ arguments: [String], in directory: String, environment: [String: String] = [:]) throws -> Result {
+    static func run(_ arguments: [String], in directory: String, environment: [String: String] = [:], input: Data? = nil) throws -> Result {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = ["git", "-C", directory] + arguments
@@ -182,8 +227,16 @@ public enum GitWorkspace {
         let stderr = Pipe()
         process.standardOutput = stdout
         process.standardError = stderr
-        process.standardInput = FileHandle.nullDevice
+        let stdin = Pipe()
+        process.standardInput = input == nil ? FileHandle.nullDevice : stdin
         try process.run()
+        if let input {
+            // Write from another thread so a full stdout pipe can't block us.
+            DispatchQueue.global().async {
+                stdin.fileHandleForWriting.write(input)
+                try? stdin.fileHandleForWriting.close()
+            }
+        }
         // Read before waiting so a large diff can't fill the pipe and deadlock.
         let outData = stdout.fileHandleForReading.readDataToEndOfFile()
         let errData = stderr.fileHandleForReading.readDataToEndOfFile()

@@ -5,6 +5,8 @@ import SwiftUI
 struct RootView: View {
     @Environment(AppState.self) private var state
 
+    @Environment(\.openWindow) private var openWindow
+
     var body: some View {
         @Bindable var state = state
         ZStack {
@@ -17,8 +19,10 @@ struct RootView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        // Accent colors are read when views are built, so rebuild on a palette change.
+        .id(state.config.accent)
         .foregroundStyle(Theme.textPrimary)
-        .preferredColorScheme(.dark)
+        .onAppear { state.openMainWindow = { openWindow(id: "main") } }
         .sheet(isPresented: $state.showPalette) {
             CommandPalette()
         }
@@ -43,6 +47,8 @@ struct RootView: View {
             }
         case .usage:
             UsageScreen()
+        case .search:
+            SearchScreen()
         case let .history(id):
             if let record = state.historyRecord(id: id) {
                 HistoryDetailView(record: record).id(id)
@@ -70,6 +76,7 @@ struct SidebarView: View {
                                badge: activeCount > 0 ? "\(activeCount)" : nil)
                         NavRow(title: "Usage", symbol: "waveform.path.ecg", item: .usage,
                                badge: usageBadge)
+                        NavRow(title: "Search", symbol: "magnifyingglass", item: .search)
                     }
 
                     section("Chats") {

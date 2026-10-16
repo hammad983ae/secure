@@ -1,4 +1,5 @@
 import AgentHubCore
+import AppKit
 import SwiftUI
 
 /// The chat input: multi-line, with @mention autocomplete and quick agent chips.
@@ -7,10 +8,18 @@ struct Composer: View {
     let model: ConversationModel
     @State private var text = ""
     @State private var highlighted = 0
+    @State private var attachments: [String] = []
+    @State private var dropTargeted = false
     @FocusState private var focused: Bool
 
+    /// Built-in `/compare`, listed with the saved prompts.
+    static let comparePrompt = SavedPrompt(
+        id: UUID(uuidString: "5A7ED000-0000-4000-8000-0000000000C0")!,
+        name: "compare", title: "Run agents side by side and pick the best", body: ""
+    )
+
     private var promptSuggestions: [SavedPrompt] {
-        PromptLibrary.completions(for: text, prompts: state.config.prompts)
+        PromptLibrary.completions(for: text, prompts: [Self.comparePrompt] + state.config.prompts)
     }
 
     private var suggestions: [AgentDefinition] {
@@ -29,7 +38,17 @@ struct Composer: View {
             }
 
             VStack(alignment: .leading, spacing: 10) {
-                TextField("Message your agents — @claude, @codex, @all, or /prompt…", text: $text, axis: .vertical)
+                if !attachments.isEmpty {
+                    ScrollView(.horizontal) {
+                        HStack(spacing: 6) {
+                            ForEach(attachments, id: \.self) { path in
+                                AttachmentChip(path: path) { attachments.removeAll { $0 == path } }
+                            }
+                        }
+                    }
+                    .scrollIndicators(.never)
+                }
+                TextField("Message your agents — @claude, @a task → @b task, /compare, or /prompt…", text: $text, axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(.system(size: 14))
                     .lineLimit(1...8)
@@ -83,6 +102,18 @@ struct Composer: View {
                         }
                         .buttonStyle(.plain)
                     }
+                    Menu {
+                        Button("Attach Files…", action: chooseFiles)
+                        Button("Paste Image or Files", action: pasteFromClipboard)
+                            .keyboardShortcut("v", modifiers: [.command, .shift])
+                    } label: {
+                        Image(systemName: "paperclip")
+                    }
+                    .menuStyle(.button)
+                    .buttonStyle(.borderless)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help("Attach files or screenshots (or drop them here). Images go to API models; terminal agents get the file paths.")
                     Spacer()
                     if state.isRouting { ProgressView().controlSize(.small) }
                     Text("⏎ send · ⇧⏎ new line")
@@ -102,7 +133,13 @@ struct Composer: View {
                 }
             }
             .padding(14)
-            .glassCard(radius: 18, tint: focused ? Theme.cyan : nil, glow: focused)
+            .glassCard(radius: 18, tint: dropTargeted ? Theme.violet : focused ? Theme.cyan : nil, glow: focused || dropTargeted)
+            .dropDestination(for: URL.self) { urls, _ in
+                let files = urls.filter(\.isFileURL)
+                guard !files.isEmpty else { return false }
+                attach(files.map(\.path))
+                return true
+            } isTargeted: { dropTargeted = $0 }
             .animation(.easeOut(duration: 0.2), value: focused)
 
             if let notice = state.notice {
@@ -118,7 +155,39 @@ struct Composer: View {
         .onAppear { focused = true }
     }
 
-    private var canSend: Bool { !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    private var canSend: Bool { !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty }
+
+    // MARK: Attachments
+
+    private func attach(_ paths: [String]) {
+        for path in paths where !attachments.contains(path) { attachments.append(path) }
+        focused = true
+    }
+
+    private func chooseFiles() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Attach"
+        if panel.runModal() == .OK { attach(panel.urls.map(\.path)) }
+    }
+
+    /// Files copied in Finder, or an image (like a screenshot copied with ⌃⇧⌘4).
+    private func pasteFromClipboard() {
+        let board = NSPasteboard.general
+        if let urls = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {
+            attach(urls.map(\.path))
+        } else if let data = board.data(forType: .png), let path = state.saveAttachment(data, fileExtension: "png") {
+            attach([path])
+        } else if let tiff = board.data(forType: .tiff), let rep = NSBitmapImageRep(data: tiff),
+                  let png = rep.representation(using: .png, properties: [:]), let path = state.saveAttachment(png, fileExtension: "png") {
+            attach([path])
+        } else {
+            state.notice = "The clipboard has no image or files to attach."
+        }
+    }
+
 
     private var mentionMenu: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -194,8 +263,10 @@ struct Composer: View {
     private func submit() {
         guard canSend else { return }
         let input = text
+        let files = attachments
         text = ""
-        state.send(input, in: model)
+        attachments = []
+        state.send(input, attachments: files, in: model)
         focused = true
     }
 

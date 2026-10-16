@@ -31,6 +31,8 @@ public struct AgentHubApp: App {
                     .keyboardShortcut("b", modifiers: [.command, .shift])
                 Button("Usage") { state.selection = .usage }
                     .keyboardShortcut("u", modifiers: [.command, .shift])
+                Button("Search Chats") { state.selection = .search }
+                    .keyboardShortcut("f", modifiers: [.command, .shift])
                 Divider()
                 Button("Toggle Split View") {
                     if let session = state.selectedTerminal { state.toggleSplit(session) }

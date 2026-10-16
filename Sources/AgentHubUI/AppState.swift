@@ -1,4 +1,5 @@
 import AgentHubCore
+import AppKit
 import Foundation
 import Observation
 import WidgetKit
@@ -53,13 +54,15 @@ final class ConversationModel: Identifiable {
     @ObservationIgnored var pendingText: [UUID: String] = [:]
     @ObservationIgnored var flushScheduled = false
     var unread = false
+    /// A running pipeline (`@a … → @b …`), which starts one run after another.
+    var pipelineTask: Task<Void, Never>?
 
     init(_ conversation: Conversation) {
         self.id = conversation.id
         self.conversation = conversation
     }
 
-    var isBusy: Bool { !tasks.isEmpty }
+    var isBusy: Bool { !tasks.isEmpty || pipelineTask != nil }
 }
 
 enum SidebarItem: Hashable {
@@ -67,6 +70,7 @@ enum SidebarItem: Hashable {
     case terminal(UUID)
     case board
     case usage
+    case search
     case history(UUID)
 }
 
@@ -80,6 +84,8 @@ final class AppState {
     private let historyStore: HistoryStore
     private let usageStore: UsageStore
     private let conversationStore: ConversationStore
+    /// App Support/AgentHub (or a temporary folder in demo mode).
+    private let directory: URL
     private let logScanner = AgentLogScanner()
     private let runner = AgentRunner()
     private let headlessRunner = HeadlessRunner()
@@ -97,6 +103,10 @@ final class AppState {
     /// Short status line under the composer (errors, hints, routing).
     var notice: String?
     var isRouting = false
+    /// Chat entry to scroll to after opening a search result.
+    var scrollTarget: UUID?
+    /// Bumped when worktrees are created, applied, or discarded.
+    private(set) var worktreeVersion = 0
 
     /// Usage from Agent Hub's own API calls.
     private(set) var apiUsage: [UsageRecord] = []
@@ -112,6 +122,9 @@ final class AppState {
     private var toolbox: MCPToolbox?
     private var pendingApprovals: [UUID: CheckedContinuation<Bool, Never>] = [:]
     private var refreshTimer: Timer?
+    /// Opens a main window (set by a view that has SwiftUI's `openWindow`).
+    @ObservationIgnored var openMainWindow: (() -> Void)?
+    @ObservationIgnored private var quickPrompt: QuickPromptController?
 
     init(demo: Bool = false) {
         isDemo = demo
@@ -122,6 +135,7 @@ final class AppState {
             let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             directory = support.appendingPathComponent("AgentHub", isDirectory: true)
         }
+        self.directory = directory
         store = HubStore(directory: directory)
         historyStore = HistoryStore(directory: directory)
         usageStore = UsageStore(directory: directory)
@@ -148,6 +162,8 @@ final class AppState {
                 MainActor.assumeIsolated { self?.refreshUsage() }
             }
         }
+        applyAppearance()
+        if !demo { updateHotKey() }
         if let recent = sortedConversations.first(where: { !$0.conversation.entries.isEmpty }) {
             selection = .chat(recent.id)
         } else {
@@ -179,6 +195,47 @@ final class AppState {
             Task { await old.shutdown() }
         }
         if config.agents != oldAgents { refreshInstalledAgents() }
+        applyAppearance()
+        if !isDemo { updateHotKey() }
+    }
+
+    // MARK: Appearance and quick prompt
+
+    private func applyAppearance() {
+        AccentStore.current = config.accent
+        let appearance: NSAppearance?
+        switch config.appearance {
+        case .dark: appearance = NSAppearance(named: .darkAqua)
+        case .light: appearance = NSAppearance(named: .aqua)
+        case .system: appearance = nil
+        }
+        let app = NSApplication.shared
+        if app.appearance?.name != appearance?.name { app.appearance = appearance }
+    }
+
+    private func updateHotKey() {
+        if config.globalHotKey {
+            GlobalHotKey.shared.onPress = { [weak self] in self?.toggleQuickPrompt() }
+            GlobalHotKey.shared.register()
+        } else {
+            GlobalHotKey.shared.unregister()
+            quickPrompt?.close()
+        }
+    }
+
+    func toggleQuickPrompt() {
+        if quickPrompt == nil { quickPrompt = QuickPromptController(state: self) }
+        quickPrompt?.toggle()
+    }
+
+    /// Brings the main window forward, opening one if it was closed.
+    func showMainWindow() {
+        NSApp.activate(ignoringOtherApps: true)
+        if let window = NSApp.windows.first(where: { $0.identifier?.rawValue.hasPrefix("main") == true && $0.canBecomeMain }) {
+            window.makeKeyAndOrderFront(nil)
+        } else {
+            openMainWindow?()
+        }
     }
 
     func refreshInstalledAgents() {
@@ -240,6 +297,16 @@ final class AppState {
 
     func deleteConversation(_ model: ConversationModel) {
         stopAll(in: model)
+        let worktreePaths = model.conversation.participants.compactMap(\.worktreePath)
+        if !worktreePaths.isEmpty {
+            let folder = nonEmpty(model.conversation.workingDirectory) ?? nonEmpty(config.defaultWorkingDirectory)
+            Task.detached(priority: .utility) {
+                let root = folder.flatMap(GitWorkspace.root(of:))
+                for path in worktreePaths {
+                    if let root { try? GitWorkspace.removeWorktree(path: path, root: root) } else { try? FileManager.default.removeItem(atPath: path) }
+                }
+            }
+        }
         conversations.removeAll { $0.id == model.id }
         conversationStore.delete(model.id)
         if selection == .chat(model.id) {
@@ -256,20 +323,35 @@ final class AppState {
     ///
     /// - `@agent task` runs each mentioned agent on the task (mentions can be anywhere).
     /// - `@all text` goes to every agent already in the conversation.
+    /// - `@a task → @b task` runs a pipeline, one step after another.
+    /// - `/compare @a @b task` runs the agents side by side, each in its own worktree.
     /// - no mention: goes to the agent addressed last, or is auto-routed.
-    func send(_ input: String, in model: ConversationModel) {
+    func send(_ input: String, attachments: [String] = [], in model: ConversationModel) {
         var text = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        guard !text.isEmpty || !attachments.isEmpty else { return }
+        if text.isEmpty { text = "Take a look at the attached files." }
         notice = nil
         let handles = Set(chatAgents.map { $0.handle.lowercased() })
-        // `/name …` runs a saved prompt.
-        if text.hasPrefix("/") {
+
+        var compare = false
+        if let rest = Self.dropCommand("compare", from: text) {
+            compare = true
+            text = rest
+        } else if text.hasPrefix("/") {
+            // `/name …` runs a saved prompt.
             guard let expanded = PromptLibrary.expand(text, prompts: config.prompts, knownHandles: handles) else {
                 notice = "No saved prompt named \(text.split(separator: " ").first ?? ""). Add one in Settings → Prompts."
                 return
             }
             text = expanded
         }
+
+        if !compare, let steps = PipelineParser.parse(text, knownHandles: handles) {
+            appendUserEntry(text, attachments: attachments, in: model)
+            runPipeline(steps, attachments: attachments, in: model)
+            return
+        }
+
         let command = CommandParser.chatCommand(text, knownHandles: handles)
         let task = command.task.isEmpty ? text : command.task
 
@@ -279,16 +361,20 @@ final class AppState {
             if targets.isEmpty { notice = "No agents in this chat yet. Mention one, like @claude."; return }
         } else if !command.mentions.isEmpty {
             targets = command.mentions.compactMap { agent(handle: $0) }
-        } else if let last = model.conversation.lastAgentID, let agent = agent(id: last) {
+        } else if let last = model.conversation.lastAgentID, let agent = agent(id: last), !compare {
             targets = [agent]
         } else {
             targets = []
         }
+        var seenIDs = Set<UUID>()
+        targets = targets.filter { seenIDs.insert($0.id).inserted }
 
-        if model.conversation.entries.isEmpty { model.conversation.title = Conversation.title(from: text) }
-        model.conversation.entries.append(.user(text))
-        model.conversation.updatedAt = Date()
-        persist(model)
+        if compare, targets.count < 2 {
+            notice = "Compare needs two or more agents, like /compare @claude @codex fix the login bug."
+            return
+        }
+
+        appendUserEntry(compare ? "/compare \(text)" : text, attachments: attachments, in: model)
 
         if targets.isEmpty {
             if config.autoRoute {
@@ -298,7 +384,59 @@ final class AppState {
             }
             return
         }
-        for agent in targets { startRun(agent: agent, task: task, in: model) }
+        let group = compare ? UUID() : nil
+        for agent in targets {
+            startRun(agent: agent, task: task, attachments: attachments, compareGroup: group, in: model)
+        }
+    }
+
+    /// `/compare rest` → `rest`; nil if `text` isn't that command.
+    static func dropCommand(_ name: String, from text: String) -> String? {
+        let prefix = "/" + name
+        guard text.lowercased().hasPrefix(prefix) else { return nil }
+        let rest = text.dropFirst(prefix.count)
+        guard rest.isEmpty || rest.first?.isWhitespace == true else { return nil }
+        return rest.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func appendUserEntry(_ text: String, attachments: [String], in model: ConversationModel) {
+        if model.conversation.entries.isEmpty { model.conversation.title = Conversation.title(from: text) }
+        model.conversation.entries.append(.user(text, attachments: attachments))
+        model.conversation.updatedAt = Date()
+        persist(model)
+    }
+
+    /// Runs pipeline steps one after another; each step sees the earlier
+    /// steps' replies through the conversation context. Stops at the first
+    /// step that fails or is stopped.
+    private func runPipeline(_ steps: [PipelineStep], attachments: [String], in model: ConversationModel) {
+        guard model.pipelineTask == nil else {
+            notice = "A pipeline is already running in this chat."
+            return
+        }
+        model.pipelineTask = Task { [weak self] in
+            defer { model.pipelineTask = nil }
+            guard let self else { return }
+            for (index, step) in steps.enumerated() {
+                guard !Task.isCancelled, let agent = self.agent(handle: step.handle) else { break }
+                let label = "\(index + 1)/\(steps.count)"
+                guard let runID = self.startRun(
+                    agent: agent,
+                    task: PipelineParser.prompt(for: step, index: index, total: steps.count),
+                    attachments: index == 0 ? attachments : [],
+                    pipelineStep: label,
+                    in: model
+                ) else { break }
+                await model.tasks[runID]?.value
+                let status = model.conversation.entries.first { $0.id == runID }?.run?.status
+                if status != .done {
+                    if !Task.isCancelled, index < steps.count - 1 {
+                        self.notice = "Pipeline stopped: step \(label) (\(agent.name)) didn't finish."
+                    }
+                    break
+                }
+            }
+        }
     }
 
     /// Sends a quick task from the menu bar into a fresh chat.
@@ -317,6 +455,7 @@ final class AppState {
     }
 
     func stopAll(in model: ConversationModel) {
+        model.pipelineTask?.cancel()
         for runID in model.tasks.keys { stop(runID: runID, in: model) }
     }
 
@@ -331,10 +470,14 @@ final class AppState {
         startTerminal(agent: agent, task: nil)
     }
 
-    private func startRun(agent baseAgent: AgentDefinition, task: String, in model: ConversationModel) {
+    @discardableResult
+    private func startRun(
+        agent baseAgent: AgentDefinition, task: String, attachments: [String] = [],
+        compareGroup: UUID? = nil, pipelineStep: String? = nil, in model: ConversationModel
+    ) -> UUID? {
         if let blocking = BudgetEvaluator.blockingBudget(for: baseAgent, statuses: budgetStatuses) {
             notice = "\(baseAgent.name) wasn't started: \(budgetName(blocking.budget)) budget is used up. Change it in Settings → Budgets."
-            return
+            return nil
         }
         var agent = baseAgent
         if agent.runsInTerminal {
@@ -344,7 +487,9 @@ final class AppState {
         }
         let prompt = ConversationContext.prompt(task: task, for: agent.id, in: model.conversation)
 
-        let run = AgentRun(agent: agent)
+        var run = AgentRun(agent: agent)
+        run.compareGroup = compareGroup
+        run.pipelineStep = pipelineStep
         // Everything finished so far has now been shared with this agent.
         let firstActiveOther = model.conversation.entries.firstIndex {
             ($0.run?.isActive ?? false) && $0.run?.agentID != agent.id
@@ -356,15 +501,21 @@ final class AppState {
         scheduleWidgetUpdate()
 
         if agent.kind == .api {
-            startAPIRun(agent: agent, prompt: prompt, runID: run.id, in: model)
+            startAPIRun(agent: agent, prompt: prompt, attachments: attachments, runID: run.id, in: model)
         } else {
-            startHeadlessRun(agent: agent, prompt: prompt, runID: run.id, in: model)
+            let isolate = compareGroup != nil || model.conversation.isolateAgents == true
+            startHeadlessRun(agent: agent, prompt: Attachments.headlessPrompt(text: prompt, attachments: attachments),
+                             isolate: isolate, runID: run.id, in: model)
         }
+        return run.id
     }
 
-    private func startAPIRun(agent: AgentDefinition, prompt: String, runID: UUID, in model: ConversationModel) {
-        let userMessage = ChatProtocol.userMessage(prompt)
-        let transcript = (model.conversation.participant(agent.id)?.transcript ?? []) + [userMessage]
+    private func startAPIRun(agent: AgentDefinition, prompt: String, attachments: [String], runID: UUID, in model: ConversationModel) {
+        let previous = model.conversation.participant(agent.id)?.transcript ?? []
+        let userMessage = Attachments.userMessage(text: prompt, attachments: attachments, provider: agent.provider ?? .anthropic)
+        let transcript = previous + [userMessage]
+        // Saved history keeps file paths rather than image data.
+        let savedMessage = ChatProtocol.userMessage(Attachments.headlessPrompt(text: prompt, attachments: attachments))
         let key = agent.apiKeyAccount.flatMap(KeychainStore.read(account:))
         let tools: ToolExecutor? = agent.useTools ? currentToolbox() : nil
         let runner = runner
@@ -384,7 +535,7 @@ final class AppState {
                         await self?.handle(event, runID: runID, agent: agent, in: model)
                     }
                 )
-                model.conversation.updateParticipant(agent.id) { $0.transcript = transcript + appended }
+                model.conversation.updateParticipant(agent.id) { $0.transcript = previous + [savedMessage] + appended }
             } catch {
                 failed = !(error is CancellationError || Task.isCancelled)
                 let text = failed ? error.localizedDescription : "Stopped."
@@ -394,23 +545,26 @@ final class AppState {
         }
     }
 
-    private func startHeadlessRun(agent: AgentDefinition, prompt: String, runID: UUID, in model: ConversationModel) {
-        let resumeID = model.conversation.participant(agent.id)?.resumeID
-        guard let spec = LaunchPlanner.headless(
-            agent: agent, prompt: prompt, resumeID: resumeID,
-            mcpServers: config.mcpServers, mcpConfigPath: store.mcpConfigURL.path, shell: shell
-        ) else {
-            model.conversation.updateRun(runID) {
-                $0.messages.append(ChatMessage(role: .system, text: "\(agent.name) can't run from chat. Open it in a terminal instead."))
-            }
-            finishRun(runID, failed: true, in: model)
-            return
-        }
-        if agent.headless == .claudeCode, !config.mcpServers.isEmpty, !isDemo { try? store.save(config) }
+    private func startHeadlessRun(agent baseAgent: AgentDefinition, prompt: String, isolate: Bool, runID: UUID, in model: ConversationModel) {
+        if baseAgent.headless == .claudeCode, !config.mcpServers.isEmpty, !isDemo { try? store.save(config) }
         let runner = headlessRunner
-        let folder = agent.workingDirectory
 
         model.tasks[runID] = Task { [weak self] in
+            var agent = baseAgent
+            if isolate, let folder = agent.workingDirectory, let self {
+                if let worktree = await self.worktree(for: agent, folder: folder, runID: runID, in: model) {
+                    agent.workingDirectory = worktree
+                }
+            }
+            guard let spec = self?.headlessSpec(agent: agent, prompt: prompt, in: model) else {
+                model.conversation.updateRun(runID) {
+                    $0.messages.append(ChatMessage(role: .system, text: "\(agent.name) can't run from chat. Open it in a terminal instead."))
+                }
+                self?.finishRun(runID, failed: true, in: model)
+                return
+            }
+            let folder = agent.workingDirectory
+
             // Snapshot the git working tree first so the run's edits can be shown and undone.
             let before: (root: String, tree: String)? = await Task.detached(priority: .userInitiated) {
                 guard let folder, let root = GitWorkspace.root(of: folder), let tree = try? GitWorkspace.snapshot(root: root) else { return nil }
@@ -440,6 +594,186 @@ final class AppState {
                 if let changes { model.conversation.updateRun(runID) { $0.changes = changes } }
             }
             self?.finishRun(runID, failed: failed, in: model)
+        }
+    }
+
+    private func headlessSpec(agent: AgentDefinition, prompt: String, in model: ConversationModel) -> LaunchSpec? {
+        LaunchPlanner.headless(
+            agent: agent, prompt: prompt, resumeID: model.conversation.participant(agent.id)?.resumeID,
+            mcpServers: config.mcpServers, mcpConfigPath: store.mcpConfigURL.path, shell: shell
+        )
+    }
+
+    // MARK: Worktrees
+
+    /// The agent's own worktree for this chat, created on first use from the
+    /// chat folder's current files. nil (with a note on the run) if the
+    /// folder isn't in a git repository.
+    private func worktree(for agent: AgentDefinition, folder: String, runID: UUID, in model: ConversationModel) async -> String? {
+        if let existing = model.conversation.participant(agent.id)?.worktreePath,
+           FileManager.default.fileExists(atPath: existing) {
+            return existing
+        }
+        let name = "\(model.id.uuidString.prefix(8))-\(agent.handle.lowercased())"
+        let path = directory.appendingPathComponent("worktrees", isDirectory: true).appendingPathComponent(name).path
+        let result = await Task.detached(priority: .userInitiated) { () -> Result<String, Error>? in
+            guard let root = GitWorkspace.root(of: folder) else { return nil }
+            if FileManager.default.fileExists(atPath: path) { try? GitWorkspace.removeWorktree(path: path, root: root) }
+            return Result(catching: { try GitWorkspace.createWorktree(from: root, at: path) })
+        }.value
+        switch result {
+        case let .success(base):
+            model.conversation.updateParticipant(agent.id) {
+                $0.worktreePath = path
+                $0.worktreeBase = base
+                // Agent sessions are tied to their folder, so start a fresh one.
+                $0.resumeID = nil
+            }
+            worktreeVersion += 1
+            model.conversation.updateRun(runID) {
+                $0.messages.append(ChatMessage(role: .system, text: "Working in its own worktree. Apply or discard its changes from the bar at the top of the chat."))
+            }
+            return path
+        case let .failure(error):
+            model.conversation.updateRun(runID) {
+                $0.messages.append(ChatMessage(role: .system, text: "Couldn't create a worktree (\(error.localizedDescription)), so this run uses the shared folder."))
+            }
+        case nil:
+            model.conversation.updateRun(runID) {
+                $0.messages.append(ChatMessage(role: .system, text: "The folder isn't a git repository, so agents share it instead of getting their own worktrees."))
+            }
+        }
+        return nil
+    }
+
+    struct WorktreeInfo: Identifiable {
+        let agentID: UUID
+        let agentName: String
+        let symbol: String
+        let path: String
+        var id: UUID { agentID }
+    }
+
+    /// Agents in this chat that have their own worktree.
+    func worktrees(in model: ConversationModel) -> [WorktreeInfo] {
+        _ = worktreeVersion
+        return model.conversation.participants.compactMap { participant in
+            guard let path = participant.worktreePath else { return nil }
+            let agent = agent(id: participant.agentID)
+            return WorktreeInfo(agentID: participant.agentID, agentName: agent?.name ?? "Agent", symbol: agent?.symbol ?? "sparkle", path: path)
+        }
+    }
+
+    func setIsolation(_ on: Bool, for model: ConversationModel) {
+        model.conversation.isolateAgents = on ? true : nil
+        persist(model)
+    }
+
+    /// Applies an agent's worktree changes to the chat folder, then removes the worktree.
+    @discardableResult
+    func applyWorktree(agentID: UUID, in model: ConversationModel) async -> Bool {
+        guard let participant = model.conversation.participant(agentID),
+              let path = participant.worktreePath, let base = participant.worktreeBase,
+              let folder = nonEmpty(model.conversation.workingDirectory) ?? nonEmpty(config.defaultWorkingDirectory) else { return false }
+        let error = await Task.detached(priority: .userInitiated) { () -> String? in
+            guard let root = GitWorkspace.root(of: folder) else { return "The chat folder isn't a git repository." }
+            do {
+                try GitWorkspace.applyWorktree(path: path, base: base, into: root)
+                try? GitWorkspace.removeWorktree(path: path, root: root)
+                return nil
+            } catch {
+                return error.localizedDescription
+            }
+        }.value
+        let name = agent(id: agentID)?.name ?? "The agent"
+        if let error {
+            notice = "Couldn't apply \(name)'s changes: \(error). The worktree is still there to review."
+            return false
+        }
+        clearWorktree(agentID: agentID, in: model)
+        notice = "Applied \(name)'s changes to \((folder as NSString).lastPathComponent)."
+        return true
+    }
+
+    /// Deletes an agent's worktree and everything in it.
+    func discardWorktree(agentID: UUID, in model: ConversationModel) async {
+        guard let path = model.conversation.participant(agentID)?.worktreePath else { return }
+        let folder = nonEmpty(model.conversation.workingDirectory) ?? nonEmpty(config.defaultWorkingDirectory)
+        await Task.detached(priority: .userInitiated) {
+            if let folder, let root = GitWorkspace.root(of: folder) {
+                try? GitWorkspace.removeWorktree(path: path, root: root)
+            } else {
+                try? FileManager.default.removeItem(atPath: path)
+            }
+        }.value
+        clearWorktree(agentID: agentID, in: model)
+    }
+
+    private func clearWorktree(agentID: UUID, in model: ConversationModel) {
+        model.conversation.updateParticipant(agentID) {
+            $0.worktreePath = nil
+            $0.worktreeBase = nil
+            $0.resumeID = nil
+        }
+        worktreeVersion += 1
+        persist(model)
+    }
+
+    // MARK: Compare
+
+    /// Runs in the same `/compare` group, in order.
+    func compareRuns(_ group: UUID, in model: ConversationModel) -> [AgentRun] {
+        model.conversation.runs.filter { $0.compareGroup == group }
+    }
+
+    /// Keeps one compared result: applies its worktree to the chat folder and
+    /// discards the other agents' worktrees.
+    func pick(runID: UUID, in model: ConversationModel) async {
+        guard let winner = model.conversation.entries.first(where: { $0.id == runID })?.run,
+              let group = winner.compareGroup else { return }
+        let runs = compareRuns(group, in: model)
+        guard !runs.contains(where: \.isActive) else { return }
+        if model.conversation.participant(winner.agentID)?.worktreePath != nil {
+            guard await applyWorktree(agentID: winner.agentID, in: model) else { return }
+        }
+        for run in runs where run.agentID != winner.agentID {
+            await discardWorktree(agentID: run.agentID, in: model)
+        }
+        for run in runs {
+            model.conversation.updateRun(run.id) { $0.picked = run.id == runID }
+        }
+        model.conversation.lastAgentID = winner.agentID
+        persist(model)
+    }
+
+    // MARK: Search and export
+
+    func search(_ query: String) -> [SearchHit] {
+        ConversationSearch.search(query, in: conversations.map(\.conversation))
+    }
+
+    func open(_ hit: SearchHit) {
+        guard let model = conversation(id: hit.conversationID) else { return }
+        model.unread = false
+        selection = .chat(model.id)
+        scrollTarget = hit.entryID
+    }
+
+    func markdown(for model: ConversationModel) -> String {
+        ConversationExporter.markdown(model.conversation)
+    }
+
+    /// Saves pasted image data so it can be attached like a file.
+    func saveAttachment(_ data: Data, fileExtension: String) -> String? {
+        let folder = directory.appendingPathComponent("attachments", isDirectory: true)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let url = folder.appendingPathComponent("pasted-\(Int(Date().timeIntervalSince1970))-\(UUID().uuidString.prefix(4)).\(fileExtension)")
+        do {
+            try data.write(to: url, options: .atomic)
+            return url.path
+        } catch {
+            notice = "Couldn't save the pasted image: \(error.localizedDescription)"
+            return nil
         }
     }
 

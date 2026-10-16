@@ -1,6 +1,7 @@
 import AgentHubCore
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// A conversation with one or more agents.
 struct ChatScreen: View {
@@ -10,6 +11,7 @@ struct ChatScreen: View {
     var body: some View {
         VStack(spacing: 0) {
             ChatHeader(model: model)
+            WorktreeBar(model: model)
             if model.conversation.entries.isEmpty {
                 ChatWelcome(model: model)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -27,15 +29,18 @@ struct ChatScreen: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 18) {
-                    ForEach(model.conversation.entries) { entry in
+                    ForEach(items) { item in
                         Group {
-                            if let run = entry.run {
+                            switch item {
+                            case let .user(entry):
+                                UserBubble(text: entry.text, date: entry.date, attachments: entry.attachments ?? [])
+                            case let .run(run):
                                 RunCard(run: run, model: model)
-                            } else {
-                                UserBubble(text: entry.text, date: entry.date)
+                            case let .compare(runs):
+                                CompareRow(runs: runs, model: model)
                             }
                         }
-                        .id(entry.id)
+                        .id(item.id)
                         .transition(.asymmetric(insertion: .move(edge: .bottom).combined(with: .opacity), removal: .opacity))
                     }
                     Color.clear.frame(height: 1).id("bottom")
@@ -47,10 +52,243 @@ struct ChatScreen: View {
                 .animation(.spring(response: 0.35, dampingFraction: 0.85), value: model.conversation.entries.count)
             }
             .scrollIndicators(.automatic)
-            .onAppear { proxy.scrollTo("bottom", anchor: .bottom) }
+            .onAppear {
+                if !scrollToTarget(proxy) { proxy.scrollTo("bottom", anchor: .bottom) }
+            }
+            .onChange(of: state.scrollTarget) { _, _ in _ = scrollToTarget(proxy) }
             .onChange(of: model.conversation.updatedAt) { _, _ in
                 withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
             }
+        }
+    }
+
+    /// Scrolls to a search result in this chat, if one is pending.
+    private func scrollToTarget(_ proxy: ScrollViewProxy) -> Bool {
+        guard let target = state.scrollTarget,
+              let item = items.first(where: { $0.contains(target) }) else { return false }
+        state.scrollTarget = nil
+        DispatchQueue.main.async {
+            withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo(item.id, anchor: .center) }
+        }
+        return true
+    }
+
+    /// Entries, with `/compare` runs grouped into one side-by-side row.
+    private var items: [TimelineItem] {
+        var result: [TimelineItem] = []
+        var groups: [UUID: Int] = [:]
+        for entry in model.conversation.entries {
+            if let run = entry.run {
+                if let group = run.compareGroup {
+                    if let index = groups[group], case var .compare(runs) = result[index] {
+                        runs.append(run)
+                        result[index] = .compare(runs)
+                    } else {
+                        groups[group] = result.count
+                        result.append(.compare([run]))
+                    }
+                } else {
+                    result.append(.run(run))
+                }
+            } else {
+                result.append(.user(entry))
+            }
+        }
+        return result
+    }
+}
+
+enum TimelineItem: Identifiable {
+    case user(ConversationEntry)
+    case run(AgentRun)
+    case compare([AgentRun])
+
+    var id: UUID {
+        switch self {
+        case let .user(entry): return entry.id
+        case let .run(run): return run.id
+        case let .compare(runs): return runs[0].id
+        }
+    }
+
+    func contains(_ entryID: UUID) -> Bool {
+        switch self {
+        case let .compare(runs): return runs.contains { $0.id == entryID }
+        default: return id == entryID
+        }
+    }
+}
+
+/// `/compare` results side by side, with time, cost, and a button to keep one.
+struct CompareRow: View {
+    @Environment(AppState.self) private var state
+    let runs: [AgentRun]
+    let model: ConversationModel
+    @State private var picking = false
+
+    private var finished: Bool { !runs.contains(where: \.isActive) }
+    private var hasPick: Bool { runs.contains { $0.picked == true } }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "rectangle.split.3x1").foregroundStyle(Theme.cyan)
+                Text("Compare").hudLabel()
+                Spacer()
+                if !finished {
+                    Text("Running…").font(.system(size: 11)).foregroundStyle(Theme.textSecondary)
+                } else if !hasPick {
+                    Text("Pick the result to keep").font(.system(size: 11)).foregroundStyle(Theme.textSecondary)
+                }
+            }
+            ScrollView(.horizontal) {
+                HStack(alignment: .top, spacing: 12) {
+                    ForEach(runs) { run in
+                        VStack(alignment: .leading, spacing: 8) {
+                            CompareStats(run: run, fastest: fastest, cheapest: cheapest)
+                            RunCard(run: run, model: model, compact: true)
+                            pickButton(run)
+                        }
+                        .frame(width: columnWidth)
+                        .opacity(hasPick && run.picked != true ? 0.55 : 1)
+                    }
+                }
+            }
+            .scrollIndicators(.automatic)
+        }
+    }
+
+    private var columnWidth: CGFloat { runs.count <= 2 ? 410 : 300 }
+
+    @ViewBuilder
+    private func pickButton(_ run: AgentRun) -> some View {
+        if run.picked == true {
+            Label("Picked", systemImage: "checkmark.seal.fill")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.emerald)
+        } else if !hasPick {
+            Button {
+                picking = true
+                Task {
+                    await state.pick(runID: run.id, in: model)
+                    picking = false
+                }
+            } label: {
+                Label("Pick this", systemImage: "hand.thumbsup.fill")
+            }
+            .buttonStyle(NeonButtonStyle())
+            .disabled(!finished || picking || run.status == .failed)
+            .help(model.conversation.participant(run.agentID)?.worktreePath != nil
+                  ? "Applies this agent's changes to the chat folder and discards the others'"
+                  : "Keeps this result and continues the chat with this agent")
+        }
+    }
+
+    private var fastest: UUID? {
+        runs.filter { $0.finishedAt != nil && $0.status == .done }
+            .min { duration($0) < duration($1) }?.id
+    }
+
+    private var cheapest: UUID? {
+        let costs = runs.compactMap { run -> (UUID, Double)? in
+            guard run.status == .done, let cost = CompareStats.cost(of: run) else { return nil }
+            return (run.id, cost)
+        }
+        guard costs.count > 1 else { return nil }
+        return costs.min { $0.1 < $1.1 }?.0
+    }
+
+    private func duration(_ run: AgentRun) -> TimeInterval {
+        (run.finishedAt ?? Date()).timeIntervalSince(run.startedAt)
+    }
+}
+
+struct CompareStats: View {
+    let run: AgentRun
+    let fastest: UUID?
+    let cheapest: UUID?
+
+    static func cost(of run: AgentRun) -> Double? {
+        run.reportedCost ?? run.model.flatMap { ModelPricing.cost(model: $0, usage: run.usage) }
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            stat("clock", run.finishedAt.map { CompareStats.duration(run.startedAt, $0) } ?? "…", best: fastest == run.id)
+            stat("bolt.fill", Formatters.tokens(run.usage.total), best: false)
+            stat("dollarsign.circle", CompareStats.cost(of: run).map(Formatters.cost) ?? "—", best: cheapest == run.id)
+            if let files = run.changes?.files.count {
+                stat("doc.on.doc", "\(files) file\(files == 1 ? "" : "s")", best: false)
+            }
+        }
+        .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+    }
+
+    private func stat(_ symbol: String, _ value: String, best: Bool) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: symbol)
+            Text(value)
+        }
+        .foregroundStyle(best ? Theme.emerald : Theme.textSecondary)
+        .help(best ? "Best of the compared runs" : "")
+    }
+
+    static func duration(_ start: Date, _ end: Date) -> String {
+        let seconds = Int(end.timeIntervalSince(start))
+        return seconds < 60 ? "\(seconds)s" : "\(seconds / 60)m \(seconds % 60)s"
+    }
+}
+
+/// Agents working in their own git worktrees, with Apply and Discard.
+struct WorktreeBar: View {
+    @Environment(AppState.self) private var state
+    let model: ConversationModel
+    @State private var busy: UUID?
+
+    var body: some View {
+        let worktrees = state.worktrees(in: model)
+        if !worktrees.isEmpty {
+            HStack(spacing: 10) {
+                Image(systemName: "arrow.triangle.branch").foregroundStyle(Theme.violet)
+                Text("Worktrees").hudLabel()
+                ForEach(worktrees) { info in
+                    HStack(spacing: 6) {
+                        AgentAvatar(symbol: info.symbol, color: AgentColors.color(id: info.agentID), size: 16)
+                        Text(info.agentName).font(.system(size: 11.5, weight: .medium))
+                        Button("Apply") { act(info) { await state.applyWorktree(agentID: info.agentID, in: model) } }
+                            .help("Copy this agent's changes into the chat folder and remove its worktree")
+                        Button("Discard") { act(info) { await state.discardWorktree(agentID: info.agentID, in: model) } }
+                            .help("Delete this agent's worktree and its changes")
+                        Button {
+                            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: info.path)])
+                        } label: {
+                            Image(systemName: "folder")
+                        }
+                        .help(info.path)
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 11.5))
+                    .disabled(busy != nil || model.isBusy)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Capsule().fill(Theme.surface))
+                    .overlay(Capsule().strokeBorder(Theme.stroke))
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 8)
+            .background(alignment: .bottom) {
+                Rectangle().fill(Theme.stroke).frame(height: 1)
+            }
+        }
+    }
+
+    private func act(_ info: AppState.WorktreeInfo, _ action: @escaping () async -> Void) {
+        busy = info.agentID
+        Task {
+            await action()
+            busy = nil
         }
     }
 }
@@ -81,6 +319,15 @@ struct ChatHeader: View {
             }
             Spacer()
             FolderChip(model: model)
+            Toggle(isOn: Binding(
+                get: { model.conversation.isolateAgents == true },
+                set: { state.setIsolation($0, for: model) }
+            )) {
+                Image(systemName: "arrow.triangle.branch")
+            }
+            .toggleStyle(.button)
+            .help("Give each terminal agent its own git worktree in this chat. Apply the changes you want from the bar that appears.")
+            ExportMenu(model: model)
             if !model.conversation.usage.isEmpty {
                 UsagePill(usage: model.conversation.usage, model: nil)
             }
@@ -98,6 +345,44 @@ struct ChatHeader: View {
         .padding(.bottom, 12)
         .background(alignment: .bottom) {
             Rectangle().fill(Theme.stroke).frame(height: 1)
+        }
+    }
+}
+
+/// Save or copy the chat as Markdown.
+struct ExportMenu: View {
+    @Environment(AppState.self) private var state
+    let model: ConversationModel
+
+    var body: some View {
+        Menu {
+            Button("Save as Markdown…", action: save)
+            Button("Copy as Markdown") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(state.markdown(for: model), forType: .string)
+                state.notice = "Copied the chat as Markdown."
+            }
+        } label: {
+            Image(systemName: "square.and.arrow.up")
+        }
+        .menuStyle(.button)
+        .buttonStyle(.borderless)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .disabled(model.conversation.entries.isEmpty)
+        .help("Export this chat as Markdown")
+    }
+
+    private func save() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
+        let safe = model.conversation.title.components(separatedBy: CharacterSet(charactersIn: "/:\\")).joined(separator: "-")
+        panel.nameFieldStringValue = "\(safe).md"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try state.markdown(for: model).write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            state.notice = "Couldn't save: \(error.localizedDescription)"
         }
     }
 }
@@ -165,7 +450,7 @@ struct ChatWelcome: View {
                     .foregroundStyle(.white)
                     .frame(width: 66, height: 66)
                     .background(Circle().fill(Theme.accentWide))
-                    .overlay(Circle().strokeBorder(.white.opacity(0.3)))
+                    .overlay(Circle().strokeBorder(Color.white.opacity(0.3)))
             }
             VStack(spacing: 8) {
                 Text("What should your agents work on?")
@@ -213,6 +498,7 @@ struct ChatWelcome: View {
 struct UserBubble: View {
     let text: String
     let date: Date
+    var attachments: [String] = []
 
     var body: some View {
         HStack {
@@ -227,7 +513,14 @@ struct UserBubble: View {
                         RoundedRectangle(cornerRadius: 16, style: .continuous)
                             .fill(LinearGradient(colors: [Theme.cyan.opacity(0.28), Theme.violet.opacity(0.30)], startPoint: .topLeading, endPoint: .bottomTrailing))
                     )
-                    .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(.white.opacity(0.14)))
+                    .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Theme.strokeStrong))
+                if !attachments.isEmpty {
+                    HStack(spacing: 6) {
+                        ForEach(attachments, id: \.self) { path in
+                            AttachmentChip(path: path)
+                        }
+                    }
+                }
                 Text(date, format: .dateTime.hour().minute())
                     .font(.system(size: 10))
                     .foregroundStyle(Theme.textTertiary)
@@ -265,6 +558,8 @@ struct RunCard: View {
     @Environment(AppState.self) private var state
     let run: AgentRun
     let model: ConversationModel
+    /// Inside a compare row: narrower, without the duration (shown above it).
+    var compact = false
 
     private var color: Color { AgentColors.color(id: run.agentID) }
 
@@ -298,9 +593,18 @@ struct RunCard: View {
                     Text(model).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Theme.textTertiary)
                 }
             }
-            StatusBadge(status: run.status)
+            StatusBadge(status: run.status, compact: compact)
+            if let step = run.pipelineStep {
+                Text("Step \(step)")
+                    .font(Theme.label)
+                    .foregroundStyle(Theme.violet)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(Theme.violet.opacity(0.14)))
+                    .help("Part of a pipeline")
+            }
             Spacer()
-            if !run.usage.isEmpty || run.reportedCost != nil {
+            if !compact, !run.usage.isEmpty || run.reportedCost != nil {
                 UsagePill(usage: run.usage, model: run.model, cost: run.reportedCost)
             }
             if run.isActive {
@@ -313,7 +617,7 @@ struct RunCard: View {
 
     private var footer: some View {
         HStack(spacing: 8) {
-            if let finished = run.finishedAt {
+            if !compact, let finished = run.finishedAt {
                 Text(durationText(from: run.startedAt, to: finished))
                     .font(.system(size: 10.5, design: .monospaced))
                     .foregroundStyle(Theme.textTertiary)
@@ -323,7 +627,7 @@ struct RunCard: View {
                 Button {
                     state.openInTerminal(run, in: model)
                 } label: {
-                    Label("Open in Terminal", systemImage: "terminal")
+                    Label(compact ? "Terminal" : "Open in Terminal", systemImage: "terminal")
                 }
                 .buttonStyle(GlassButtonStyle())
             }
@@ -381,7 +685,7 @@ struct RunMessageView: View {
                     .padding(12)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: 10).fill(Color.black.opacity(0.35)))
+            .background(RoundedRectangle(cornerRadius: 10).fill(Theme.codeBackground))
             .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.stroke))
         case .tool:
             ToolStepView(message: message)
@@ -446,7 +750,7 @@ struct ToolStepView: View {
                 }
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Color.black.opacity(0.3)))
+                .background(RoundedRectangle(cornerRadius: 8).fill(Theme.codeBackground))
             }
         }
         .padding(.horizontal, 10)
@@ -503,5 +807,44 @@ struct UsagePill: View {
         .background(Capsule().fill(Theme.surfaceRaised))
         .overlay(Capsule().strokeBorder(Theme.stroke))
         .help("In \(usage.input) · out \(usage.output) · cache read \(usage.cacheRead) · cache write \(usage.cacheWrite)")
+    }
+}
+
+/// A file attached to a message: an image thumbnail or a file icon and name.
+struct AttachmentChip: View {
+    let path: String
+    var onRemove: (() -> Void)? = nil
+
+    var body: some View {
+        HStack(spacing: 6) {
+            if Attachments.isImage(path), let image = NSImage(contentsOfFile: path) {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: 22, height: 22)
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+            } else {
+                Image(nsImage: NSWorkspace.shared.icon(forFile: path))
+                    .resizable()
+                    .frame(width: 16, height: 16)
+            }
+            Text((path as NSString).lastPathComponent)
+                .font(.system(size: 11))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: 160, alignment: .leading)
+            if let onRemove {
+                Button(action: onRemove) {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(Theme.textTertiary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(Capsule().fill(Theme.surfaceRaised))
+        .overlay(Capsule().strokeBorder(Theme.stroke))
+        .help(path)
+        .onTapGesture(count: 2) { NSWorkspace.shared.open(URL(fileURLWithPath: path)) }
     }
 }

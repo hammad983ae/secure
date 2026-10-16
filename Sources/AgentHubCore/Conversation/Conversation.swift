@@ -16,6 +16,12 @@ public struct AgentRun: Codable, Identifiable, Hashable, Sendable {
     public var finishedAt: Date?
     /// Files the run changed (git working folders only).
     public var changes: RunChanges?
+    /// Runs started together by `/compare` share a group and show side by side.
+    public var compareGroup: UUID?
+    /// In a compare group: true for the result the user picked, false for the others.
+    public var picked: Bool?
+    /// "2/3" when the run is a step of a pipeline.
+    public var pipelineStep: String?
 
     public init(id: UUID = UUID(), agent: AgentDefinition, startedAt: Date = Date()) {
         self.id = id
@@ -49,13 +55,15 @@ public struct ConversationEntry: Codable, Identifiable, Hashable, Sendable {
     public var text: String
     /// Run entries.
     public var run: AgentRun?
+    /// User entries: paths of attached files.
+    public var attachments: [String]?
 
-    public static func user(_ text: String, date: Date = Date()) -> ConversationEntry {
-        ConversationEntry(id: UUID(), kind: .user, date: date, text: text, run: nil)
+    public static func user(_ text: String, attachments: [String] = [], date: Date = Date()) -> ConversationEntry {
+        ConversationEntry(id: UUID(), kind: .user, date: date, text: text, run: nil, attachments: attachments.isEmpty ? nil : attachments)
     }
 
     public static func run(_ run: AgentRun) -> ConversationEntry {
-        ConversationEntry(id: run.id, kind: .run, date: run.startedAt, text: "", run: run)
+        ConversationEntry(id: run.id, kind: .run, date: run.startedAt, text: "", run: run, attachments: nil)
     }
 }
 
@@ -68,6 +76,10 @@ public struct Participant: Codable, Hashable, Sendable {
     public var resumeID: String?
     /// Entries before this index have already been shared with the agent.
     public var seenEntryCount: Int
+    /// The agent's own git worktree, when the chat isolates agents.
+    public var worktreePath: String?
+    /// Tree the worktree started from, to diff and apply its changes.
+    public var worktreeBase: String?
 
     public init(agentID: UUID) {
         self.agentID = agentID
@@ -87,6 +99,8 @@ public struct Conversation: Codable, Identifiable, Hashable, Sendable {
     public var workingDirectory: String?
     public var entries: [ConversationEntry]
     public var participants: [Participant]
+    /// Give each agent its own git worktree (nil = off).
+    public var isolateAgents: Bool?
     /// Agent addressed most recently; un-mentioned follow-ups go to it.
     public var lastAgentID: UUID?
 

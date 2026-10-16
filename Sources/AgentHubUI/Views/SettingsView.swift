@@ -19,7 +19,6 @@ struct SettingsView: View {
                 .tabItem { Label("General", systemImage: "gearshape") }
         }
         .frame(width: 720, height: 560)
-        .preferredColorScheme(.dark)
     }
 }
 
@@ -397,6 +396,42 @@ private struct GeneralSettings: View {
 
     var body: some View {
         Form {
+            Section("Appearance") {
+                Picker("Theme", selection: Binding(
+                    get: { state.config.appearance },
+                    set: { value in state.updateConfig { $0.appearance = value } }
+                )) {
+                    ForEach(AppearanceMode.allCases, id: \.self) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Picker("Accent", selection: Binding(
+                    get: { state.config.accent },
+                    set: { value in state.updateConfig { $0.accent = value } }
+                )) {
+                    ForEach(AccentPalette.allCases, id: \.self) { palette in
+                        HStack {
+                            Circle()
+                                .fill(LinearGradient(colors: palette.swatch, startPoint: .leading, endPoint: .trailing))
+                                .frame(width: 12, height: 12)
+                            Text(palette.title)
+                        }
+                        .tag(palette)
+                    }
+                }
+            }
+
+            Section("Quick prompt") {
+                Toggle("Open a quick prompt from any app with ⌥Space", isOn: Binding(
+                    get: { state.config.globalHotKey },
+                    set: { value in state.updateConfig { $0.globalHotKey = value } }
+                ))
+                Text("Type a task, mention agents as usual, and press Return. It starts a new chat. Turn this off if ⌥Space is used by another app.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Sessions") {
                 HStack {
                     TextField("Default working directory", text: $directory)
