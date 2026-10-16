@@ -9,6 +9,10 @@ struct Composer: View {
     @State private var highlighted = 0
     @FocusState private var focused: Bool
 
+    private var promptSuggestions: [SavedPrompt] {
+        PromptLibrary.completions(for: text, prompts: state.config.prompts)
+    }
+
     private var suggestions: [AgentDefinition] {
         let handles = CommandParser.completions(for: text, handles: state.chatAgents.map { $0.handle.lowercased() })
         return handles.compactMap { state.agent(handle: $0) }
@@ -19,10 +23,13 @@ struct Composer: View {
             if !suggestions.isEmpty {
                 mentionMenu
                     .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else if !promptSuggestions.isEmpty {
+                promptMenu
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
             VStack(alignment: .leading, spacing: 10) {
-                TextField("Message your agents — @claude, @codex, @all…", text: $text, axis: .vertical)
+                TextField("Message your agents — @claude, @codex, @all, or /prompt…", text: $text, axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(.system(size: 14))
                     .lineLimit(1...8)
@@ -30,21 +37,29 @@ struct Composer: View {
                     .onKeyPress(.return, phases: .down) { press in
                         if press.modifiers.contains(.shift) { return .ignored }
                         if !suggestions.isEmpty { complete(suggestions[min(highlighted, suggestions.count - 1)]); return .handled }
+                        if !promptSuggestions.isEmpty, !text.contains(" ") {
+                            let prompt = promptSuggestions[min(highlighted, promptSuggestions.count - 1)]
+                            if text.dropFirst().lowercased() != prompt.name.lowercased() { completePrompt(prompt); return .handled }
+                        }
                         submit()
                         return .handled
                     }
                     .onKeyPress(.tab) {
-                        guard let first = suggestions.first else { return .ignored }
-                        complete(first)
-                        return .handled
+                        if let first = suggestions.first { complete(first); return .handled }
+                        if !promptSuggestions.isEmpty {
+                            completePrompt(promptSuggestions[min(highlighted, promptSuggestions.count - 1)])
+                            return .handled
+                        }
+                        return .ignored
                     }
                     .onKeyPress(.downArrow) {
-                        guard !suggestions.isEmpty else { return .ignored }
-                        highlighted = min(highlighted + 1, suggestions.count - 1)
+                        let count = suggestions.isEmpty ? promptSuggestions.count : suggestions.count
+                        guard count > 0 else { return .ignored }
+                        highlighted = min(highlighted + 1, count - 1)
                         return .handled
                     }
                     .onKeyPress(.upArrow) {
-                        guard !suggestions.isEmpty else { return .ignored }
+                        guard !suggestions.isEmpty || !promptSuggestions.isEmpty else { return .ignored }
                         highlighted = max(highlighted - 1, 0)
                         return .handled
                     }
@@ -135,6 +150,45 @@ struct Composer: View {
         .padding(6)
         .frame(maxWidth: 420)
         .glassCard(radius: 12)
+    }
+
+    private var promptMenu: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(Array(promptSuggestions.enumerated()), id: \.element.id) { index, prompt in
+                Button {
+                    completePrompt(prompt)
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "text.badge.star")
+                            .foregroundStyle(Theme.violet)
+                            .frame(width: 22)
+                        VStack(alignment: .leading, spacing: 0) {
+                            HStack(spacing: 6) {
+                                Text("/\(prompt.name)").font(.system(size: 12, weight: .semibold, design: .monospaced)).foregroundStyle(Theme.cyan)
+                                Text(prompt.title).font(.system(size: 12.5, weight: .medium))
+                            }
+                            Text(prompt.agents.isEmpty ? "Uses the agents you mention" : "Default: " + prompt.agents.map { "@\($0)" }.joined(separator: " "))
+                                .font(.system(size: 11)).foregroundStyle(Theme.textSecondary)
+                        }
+                        Spacer()
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(index == highlighted ? Theme.violet.opacity(0.16) : .clear))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(6)
+        .frame(maxWidth: 460)
+        .glassCard(radius: 12)
+    }
+
+    private func completePrompt(_ prompt: SavedPrompt) {
+        text = "/\(prompt.name) "
+        highlighted = 0
+        focused = true
     }
 
     private func submit() {

@@ -19,6 +19,9 @@ public struct HubConfiguration: Codable, Equatable, Sendable {
     public var hasHeadlessSettings: Bool
     /// Show the usage widget in the menu bar.
     public var showMenuBarWidget: Bool
+    public var budgets: [Budget]
+    /// Saved prompts, run with `/name` in chat.
+    public var prompts: [SavedPrompt]
 
     public init(
         agents: [AgentDefinition] = AgentPresets.all,
@@ -28,7 +31,9 @@ public struct HubConfiguration: Codable, Equatable, Sendable {
         routerAgentID: UUID? = nil,
         routerModel: String? = nil,
         scanAgentLogs: Bool = true,
-        showMenuBarWidget: Bool = true
+        showMenuBarWidget: Bool = true,
+        budgets: [Budget] = [],
+        prompts: [SavedPrompt] = SavedPrompt.defaults
     ) {
         self.agents = agents
         self.mcpServers = mcpServers
@@ -39,11 +44,13 @@ public struct HubConfiguration: Codable, Equatable, Sendable {
         self.scanAgentLogs = scanAgentLogs
         self.hasHeadlessSettings = true
         self.showMenuBarWidget = showMenuBarWidget
+        self.budgets = budgets
+        self.prompts = prompts
     }
 
     private enum CodingKeys: String, CodingKey {
         case agents, mcpServers, defaultWorkingDirectory, autoRoute, routerAgentID, routerModel, scanAgentLogs
-        case hasHeadlessSettings, showMenuBarWidget
+        case hasHeadlessSettings, showMenuBarWidget, budgets, prompts
     }
 
     public init(from decoder: Decoder) throws {
@@ -57,6 +64,8 @@ public struct HubConfiguration: Codable, Equatable, Sendable {
         scanAgentLogs = try c.decodeIfPresent(Bool.self, forKey: .scanAgentLogs) ?? true
         hasHeadlessSettings = try c.decodeIfPresent(Bool.self, forKey: .hasHeadlessSettings) ?? false
         showMenuBarWidget = try c.decodeIfPresent(Bool.self, forKey: .showMenuBarWidget) ?? true
+        budgets = try c.decodeIfPresent([Budget].self, forKey: .budgets) ?? []
+        prompts = try c.decodeIfPresent([SavedPrompt].self, forKey: .prompts) ?? SavedPrompt.defaults
     }
 
     /// The agent used for auto-routing, with the router model applied.

@@ -1,4 +1,5 @@
 import AgentHubCore
+import ServiceManagement
 import SwiftUI
 
 struct SettingsView: View {
@@ -10,6 +11,10 @@ struct SettingsView: View {
                 .tabItem { Label("MCP Servers", systemImage: "point.3.connected.trianglepath.dotted") }
             APIKeySettings()
                 .tabItem { Label("API Keys", systemImage: "key") }
+            BudgetSettings()
+                .tabItem { Label("Budgets", systemImage: "gauge.with.dots.needle.67percent") }
+            PromptSettings()
+                .tabItem { Label("Prompts", systemImage: "text.badge.star") }
             GeneralSettings()
                 .tabItem { Label("General", systemImage: "gearshape") }
         }
@@ -431,6 +436,7 @@ private struct GeneralSettings: View {
                     get: { state.config.showMenuBarWidget },
                     set: { value in state.updateConfig { $0.showMenuBarWidget = value } }
                 ))
+                LaunchAtLoginToggle()
             }
 
             Section("Usage") {
@@ -472,6 +478,215 @@ private struct GeneralSettings: View {
     private func saveRouterModel() {
         let value = routerModel.trimmingCharacters(in: .whitespaces)
         state.updateConfig { $0.routerModel = value.isEmpty ? nil : value }
+    }
+}
+
+// MARK: - Launch at login
+
+private struct LaunchAtLoginToggle: View {
+    @State private var enabled = SMAppService.mainApp.status == .enabled
+    @State private var error: String?
+
+    var body: some View {
+        Toggle("Open Agent Hub at login", isOn: Binding(
+            get: { enabled },
+            set: { value in
+                do {
+                    if value { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+                    error = nil
+                } catch {
+                    self.error = "Only works for the installed app (built from App/AgentHub.xcodeproj): \(error.localizedDescription)"
+                }
+                enabled = SMAppService.mainApp.status == .enabled
+            }
+        ))
+        if let error {
+            Text(error).font(.caption).foregroundStyle(.secondary)
+        }
+    }
+}
+
+// MARK: - Budgets
+
+private struct BudgetSettings: View {
+    @Environment(AppState.self) private var state
+    @State private var agentID: UUID?
+    @State private var period: Budget.Period = .daily
+    @State private var useDollars = true
+    @State private var amount = ""
+    @State private var hardStop = false
+
+    var body: some View {
+        Form {
+            Section {
+                if state.config.budgets.isEmpty {
+                    Text("No budgets yet.").foregroundStyle(.secondary)
+                }
+                ForEach(state.budgetStatuses) { status in
+                    HStack(spacing: 10) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text(state.budgetName(status.budget)).fontWeight(.medium)
+                                if status.budget.hardStop {
+                                    Text("hard stop").font(.caption2).padding(.horizontal, 5).padding(.vertical, 1)
+                                        .background(Capsule().fill(Color.red.opacity(0.2)))
+                                }
+                            }
+                            ProgressView(value: min(status.fraction, 1))
+                                .tint(status.isExceeded ? .red : status.isWarning ? .orange : .accentColor)
+                            Text("\(state.budgetUsedText(status)) of \(state.budgetLimitText(status.budget)) used")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Button(role: .destructive) {
+                            state.updateConfig { $0.budgets.removeAll { $0.id == status.budget.id } }
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                }
+            } header: {
+                Text("Budgets")
+            } footer: {
+                Text("You get a notification at 80% and at 100%, and the menu bar icon turns orange or red. A hard stop keeps Agent Hub from starting new runs for that agent until the period resets. It can't limit Claude Code or Codex when you use them outside Agent Hub.")
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Add a budget") {
+                Picker("Agent", selection: $agentID) {
+                    Text("All agents").tag(UUID?.none)
+                    ForEach(state.config.agents.filter { $0.kind == .api || $0.headless == .claudeCode || $0.headless == .codex }) { agent in
+                        Text(agent.name).tag(UUID?.some(agent.id))
+                    }
+                }
+                Picker("Period", selection: $period) {
+                    ForEach(Budget.Period.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                Picker("Limit in", selection: $useDollars) {
+                    Text("US dollars (estimated)").tag(true)
+                    Text("Tokens").tag(false)
+                }
+                TextField(useDollars ? "Amount, e.g. 10" : "Tokens, e.g. 2000000", text: $amount)
+                Toggle("Hard stop when reached", isOn: $hardStop)
+                HStack {
+                    Spacer()
+                    Button("Add Budget", action: add).disabled(parsedAmount == nil)
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    private var parsedAmount: Double? {
+        let value = Double(amount.replacingOccurrences(of: ",", with: "").replacingOccurrences(of: "$", with: "").trimmingCharacters(in: .whitespaces))
+        return value.flatMap { $0 > 0 ? $0 : nil }
+    }
+
+    private func add() {
+        guard let value = parsedAmount else { return }
+        let limit: Budget.Limit = useDollars ? .dollars(value) : .tokens(Int(value))
+        let budget = Budget(agentID: agentID, period: period, limit: limit, hardStop: hardStop)
+        state.updateConfig { $0.budgets.append(budget) }
+        amount = ""
+    }
+}
+
+// MARK: - Prompts
+
+private struct PromptSettings: View {
+    @Environment(AppState.self) private var state
+    @State private var selectedID: UUID?
+
+    var body: some View {
+        HSplitView {
+            VStack(spacing: 0) {
+                List(selection: $selectedID) {
+                    ForEach(state.config.prompts) { prompt in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("/\(prompt.name)").font(.body.monospaced())
+                            Text(prompt.title).font(.caption).foregroundStyle(.secondary)
+                        }
+                        .tag(prompt.id)
+                    }
+                }
+                HStack {
+                    Button {
+                        let prompt = SavedPrompt(name: "new", title: "New prompt", body: "{input}")
+                        state.updateConfig { $0.prompts.append(prompt) }
+                        selectedID = prompt.id
+                    } label: { Image(systemName: "plus") }
+                    Button {
+                        guard let id = selectedID else { return }
+                        state.updateConfig { $0.prompts.removeAll { $0.id == id } }
+                        selectedID = nil
+                    } label: { Image(systemName: "minus") }
+                    .disabled(selectedID == nil)
+                    Spacer()
+                    Button("Restore Defaults") {
+                        state.updateConfig { config in
+                            let existing = Set(config.prompts.map(\.id))
+                            config.prompts += SavedPrompt.defaults.filter { !existing.contains($0.id) }
+                        }
+                    }
+                }
+                .buttonStyle(.borderless)
+                .padding(6)
+            }
+            .frame(minWidth: 200, maxWidth: 240)
+
+            if let prompt = state.config.prompts.first(where: { $0.id == selectedID }) {
+                PromptEditor(prompt: prompt) { updated in
+                    state.updateConfig { config in
+                        if let index = config.prompts.firstIndex(where: { $0.id == updated.id }) { config.prompts[index] = updated }
+                    }
+                }
+                .id(prompt.id)
+            } else {
+                VStack(spacing: 8) {
+                    Text("Type /name in the chat box to run a saved prompt.")
+                    Text("Write {input} where the rest of your message should go.")
+                }
+                .foregroundStyle(.secondary)
+                .padding()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+    }
+}
+
+private struct PromptEditor: View {
+    @State private var draft: SavedPrompt
+    @State private var agentsText: String
+    let onSave: (SavedPrompt) -> Void
+
+    init(prompt: SavedPrompt, onSave: @escaping (SavedPrompt) -> Void) {
+        _draft = State(initialValue: prompt)
+        _agentsText = State(initialValue: prompt.agents.map { "@\($0)" }.joined(separator: " "))
+        self.onSave = onSave
+    }
+
+    var body: some View {
+        Form {
+            TextField("Command (without /)", text: $draft.name)
+            TextField("Title", text: $draft.title)
+            LabeledContent("Prompt") {
+                TextEditor(text: $draft.body).font(.body.monospaced()).frame(minHeight: 140)
+            }
+            TextField("Default agents, e.g. @claude @codex", text: $agentsText)
+            Text("Default agents are used when your message doesn't mention any.")
+                .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                Button("Save") {
+                    var prompt = draft
+                    prompt.name = prompt.name.lowercased().filter { !$0.isWhitespace && $0 != "/" }
+                    prompt.agents = agentsText.split(separator: " ").map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "@,")).lowercased() }.filter { !$0.isEmpty }
+                    onSave(prompt)
+                }
+                .keyboardShortcut("s", modifiers: .command)
+            }
+        }
+        .formStyle(.grouped)
     }
 }
 

@@ -277,6 +277,9 @@ struct RunCard: View {
             ForEach(run.messages) { message in
                 RunMessageView(message: message, accent: color)
             }
+            if let changes = run.changes {
+                ChangesView(changes: changes, runID: run.id, model: model)
+            }
             if !run.isActive {
                 footer
             }

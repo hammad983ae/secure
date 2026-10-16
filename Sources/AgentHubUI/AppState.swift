@@ -1,6 +1,7 @@
 import AgentHubCore
 import Foundation
 import Observation
+import WidgetKit
 
 /// A live interactive terminal running an agent.
 @MainActor
@@ -257,10 +258,18 @@ final class AppState {
     /// - `@all text` goes to every agent already in the conversation.
     /// - no mention: goes to the agent addressed last, or is auto-routed.
     func send(_ input: String, in model: ConversationModel) {
-        let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        var text = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         notice = nil
         let handles = Set(chatAgents.map { $0.handle.lowercased() })
+        // `/name …` runs a saved prompt.
+        if text.hasPrefix("/") {
+            guard let expanded = PromptLibrary.expand(text, prompts: config.prompts, knownHandles: handles) else {
+                notice = "No saved prompt named \(text.split(separator: " ").first ?? ""). Add one in Settings → Prompts."
+                return
+            }
+            text = expanded
+        }
         let command = CommandParser.chatCommand(text, knownHandles: handles)
         let task = command.task.isEmpty ? text : command.task
 
@@ -323,6 +332,10 @@ final class AppState {
     }
 
     private func startRun(agent baseAgent: AgentDefinition, task: String, in model: ConversationModel) {
+        if let blocking = BudgetEvaluator.blockingBudget(for: baseAgent, statuses: budgetStatuses) {
+            notice = "\(baseAgent.name) wasn't started: \(budgetName(blocking.budget)) budget is used up. Change it in Settings → Budgets."
+            return
+        }
         var agent = baseAgent
         if agent.runsInTerminal {
             agent.workingDirectory = nonEmpty(model.conversation.workingDirectory)
@@ -340,6 +353,7 @@ final class AppState {
         model.conversation.entries.append(.run(run))
         model.conversation.lastAgentID = agent.id
         model.conversation.updateParticipant(agent.id) { $0.seenEntryCount = seen }
+        scheduleWidgetUpdate()
 
         if agent.kind == .api {
             startAPIRun(agent: agent, prompt: prompt, runID: run.id, in: model)
@@ -393,12 +407,19 @@ final class AppState {
             return
         }
         if agent.headless == .claudeCode, !config.mcpServers.isEmpty, !isDemo { try? store.save(config) }
-        let events = headlessRunner.run(spec, style: agent.headless)
+        let runner = headlessRunner
+        let folder = agent.workingDirectory
 
         model.tasks[runID] = Task { [weak self] in
+            // Snapshot the git working tree first so the run's edits can be shown and undone.
+            let before: (root: String, tree: String)? = await Task.detached(priority: .userInitiated) {
+                guard let folder, let root = GitWorkspace.root(of: folder), let tree = try? GitWorkspace.snapshot(root: root) else { return nil }
+                return (root, tree)
+            }.value
+
             var failed = false
             do {
-                for try await event in events {
+                for try await event in runner.run(spec, style: agent.headless) {
                     if case let .finished(isError, _, _) = event { failed = isError }
                     self?.handle(event, runID: runID, agent: agent, in: model)
                 }
@@ -411,8 +432,51 @@ final class AppState {
                     $0.messages.append(ChatMessage(role: .system, text: failed ? "Couldn't start \(agent.name): \(error.localizedDescription)" : "Stopped."))
                 }
             }
+            if let before {
+                let changes = await Task.detached(priority: .userInitiated) { () -> RunChanges? in
+                    guard let after = try? GitWorkspace.snapshot(root: before.root) else { return nil }
+                    return try? GitWorkspace.changes(from: before.tree, to: after, root: before.root)
+                }.value
+                if let changes { model.conversation.updateRun(runID) { $0.changes = changes } }
+            }
             self?.finishRun(runID, failed: failed, in: model)
         }
+    }
+
+    // MARK: Diff review
+
+    /// Marks a run's file changes as accepted.
+    func keepChanges(runID: UUID, in model: ConversationModel) {
+        model.conversation.updateRun(runID) { $0.changes?.state = .kept }
+        persist(model)
+    }
+
+    /// Restores the files a run changed. Returns paths edited again since the
+    /// run (and does nothing) unless `force` is set.
+    func undoChanges(runID: UUID, in model: ConversationModel, force: Bool = false) async -> [String] {
+        guard let changes = model.conversation.entries.first(where: { $0.id == runID })?.run?.changes else { return [] }
+        let result: Result<[String], Error> = await Task.detached(priority: .userInitiated) {
+            do {
+                if !force {
+                    let edited = try GitWorkspace.editedSinceRun(changes)
+                    if !edited.isEmpty { return .success(edited) }
+                }
+                try GitWorkspace.undo(changes)
+                return .success([])
+            } catch {
+                return .failure(error)
+            }
+        }.value
+        switch result {
+        case let .success(edited) where !edited.isEmpty:
+            return edited
+        case .success:
+            model.conversation.updateRun(runID) { $0.changes?.state = .undone }
+            persist(model)
+        case let .failure(error):
+            notice = "Couldn't undo: \(error.localizedDescription)"
+        }
+        return []
     }
 
     /// Moves buffered streamed text into the visible messages.
@@ -430,6 +494,7 @@ final class AppState {
     }
 
     private func finishRun(_ runID: UUID, failed: Bool, in model: ConversationModel) {
+        defer { scheduleWidgetUpdate() }
         flushText(in: model)
         model.tasks[runID] = nil
         model.openBubbles[runID] = nil
@@ -820,6 +885,7 @@ final class AppState {
             let records = await Task.detached(priority: .utility) { scanner.scan(since: since) }.value
             logUsage = records
             usageVersion += 1
+            usageDidChange()
             isScanningUsage = false
             lastUsageScan = Date()
         }
@@ -847,7 +913,114 @@ final class AppState {
         let record = UsageRecord(source: source, model: model, date: Date(), usage: usage)
         apiUsage.append(record)
         usageVersion += 1
+        usageDidChange()
         if !isDemo { try? usageStore.append(record) }
+    }
+
+    // MARK: Budgets
+
+    @ObservationIgnored private var budgetCache: (version: Int, budgets: [Budget], statuses: [BudgetStatus])?
+    @ObservationIgnored private var notifiedBudgetKeys = Set<String>()
+
+    /// Current use of every budget. Cached until usage or the budgets change.
+    var budgetStatuses: [BudgetStatus] {
+        let version = usageVersion
+        if let cache = budgetCache, cache.version == version, cache.budgets == config.budgets { return cache.statuses }
+        let records = allUsage
+        let statuses = config.budgets.map { BudgetEvaluator.status(of: $0, records: records, agents: config.agents) }
+        budgetCache = (version, config.budgets, statuses)
+        return statuses
+    }
+
+    /// The most-used budget, for the menu bar.
+    var tightestBudget: BudgetStatus? {
+        budgetStatuses.max { $0.fraction < $1.fraction }
+    }
+
+    func budgetName(_ budget: Budget) -> String {
+        let who = budget.agentID.flatMap { agent(id: $0)?.name } ?? "All agents"
+        return "\(who) · \(budget.period.title.lowercased())"
+    }
+
+    func budgetLimitText(_ budget: Budget) -> String {
+        switch budget.limit {
+        case let .tokens(limit): return "\(Formatters.tokens(limit)) tokens"
+        case let .dollars(limit): return Formatters.cost(limit)
+        }
+    }
+
+    func budgetUsedText(_ status: BudgetStatus) -> String {
+        switch status.budget.limit {
+        case .tokens: return Formatters.tokens(Int(status.used))
+        case .dollars: return Formatters.cost(status.used)
+        }
+    }
+
+    /// Notifies once per budget and period when it reaches 80% and again at 100%.
+    private func checkBudgets() {
+        for status in budgetStatuses where status.fraction >= BudgetStatus.warningFraction {
+            let level = status.isExceeded ? "exceeded" : "warning"
+            let key = status.periodKey() + level
+            guard notifiedBudgetKeys.insert(key).inserted else { continue }
+            let name = budgetName(status.budget)
+            if status.isExceeded {
+                Notifier.post(title: "Budget used up: \(name)",
+                              body: "\(budgetUsedText(status)) of \(budgetLimitText(status.budget))" + (status.budget.hardStop ? ". New runs are paused." : "."))
+            } else {
+                Notifier.post(title: "Budget at \(Int(status.fraction * 100))%: \(name)",
+                              body: "\(budgetUsedText(status)) of \(budgetLimitText(status.budget))")
+            }
+        }
+    }
+
+    private func usageDidChange() {
+        guard !isDemo else { return }
+        checkBudgets()
+        scheduleWidgetUpdate()
+    }
+
+    // MARK: Widget
+
+    @ObservationIgnored private var widgetUpdateScheduled = false
+
+    /// Writes the widget's summary file and asks WidgetKit to refresh, at most every few seconds.
+    func scheduleWidgetUpdate() {
+        guard !isDemo, !widgetUpdateScheduled else { return }
+        widgetUpdateScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            MainActor.assumeIsolated { self?.writeWidgetSnapshot() }
+        }
+    }
+
+    private func writeWidgetSnapshot() {
+        widgetUpdateScheduled = false
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        let week = usageSummary(since: calendar.date(byAdding: .day, value: -6, to: today) ?? today)
+        let todaySummary = self.todaySummary
+        let days = (0..<7).map { offset -> Int in
+            guard let day = calendar.date(byAdding: .day, value: offset - 6, to: today) else { return 0 }
+            return week.daily.filter { calendar.isDate($0.day, inSameDayAs: day) }.reduce(0) { $0 + $1.usage.total }
+        }
+        var runs = activeRuns.prefix(4).map {
+            WidgetSnapshot.Run(agent: $0.run.agentName, symbol: $0.run.agentSymbol, title: $0.conversation.conversation.title, status: $0.run.status)
+        }
+        runs += terminals.filter { !$0.isFinished }.prefix(max(0, 4 - runs.count)).map {
+            WidgetSnapshot.Run(agent: $0.agent.name, symbol: $0.agent.symbol, title: $0.title, status: $0.status)
+        }
+        let snapshot = WidgetSnapshot(
+            todayTokens: todaySummary.total.total,
+            todayCost: todaySummary.knownCost,
+            weekTokens: week.total.total,
+            weekCost: week.knownCost,
+            lastSevenDays: days,
+            runs: runs,
+            budgets: budgetStatuses.prefix(3).map { WidgetSnapshot.BudgetGauge(name: budgetName($0.budget), fraction: $0.fraction) }
+        )
+        Task.detached(priority: .utility) {
+            try? snapshot.save()
+            WidgetCenter.shared.reloadAllTimelines()
+        }
     }
 
     /// Demo data hook.

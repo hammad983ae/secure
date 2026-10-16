@@ -10,9 +10,18 @@ struct MenuBarLabel: View {
     var body: some View {
         let today = state.todaySummary
         let busy = !state.activeRuns.isEmpty
+        let budget = state.tightestBudget
         HStack(spacing: 4) {
-            Image(systemName: busy ? "sparkles" : "sparkle")
-            if today.total.total > 0 {
+            if let budget, budget.isExceeded {
+                Image(systemName: "exclamationmark.octagon.fill")
+            } else if let budget, budget.isWarning {
+                Image(systemName: "exclamationmark.triangle.fill")
+            } else {
+                Image(systemName: busy ? "sparkles" : "sparkle")
+            }
+            if let budget, budget.fraction >= BudgetStatus.warningFraction {
+                Text("\(Int(budget.fraction * 100))%").monospacedDigit()
+            } else if today.total.total > 0 {
                 Text(Formatters.tokens(today.total.total))
                     .monospacedDigit()
             }
@@ -48,6 +57,16 @@ struct MenuBarPanel: View {
             }
 
             sparkline(week)
+
+            if !state.budgetStatuses.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Budgets").hudLabel()
+                    ForEach(state.budgetStatuses.prefix(3)) { status in
+                        BudgetBar(status: status, name: state.budgetName(status.budget),
+                                  detail: "\(state.budgetUsedText(status)) / \(state.budgetLimitText(status.budget))")
+                    }
+                }
+            }
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("Live").hudLabel()
@@ -184,5 +203,36 @@ struct MenuBarPanel: View {
     private func showMainWindow() {
         openWindow(id: "main")
         NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
+/// A thin progress bar for a budget, amber at 80% and red when used up.
+struct BudgetBar: View {
+    let status: BudgetStatus
+    let name: String
+    let detail: String
+
+    private var color: Color {
+        status.isExceeded ? Theme.rose : status.isWarning ? Theme.amber : Theme.cyan
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(name).font(.system(size: 11.5, weight: .medium))
+                if status.budget.hardStop, status.isExceeded {
+                    Text("paused").font(Theme.label).foregroundStyle(Theme.rose)
+                }
+                Spacer()
+                Text(detail).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Theme.textSecondary)
+            }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Theme.surfaceRaised)
+                    Capsule().fill(color).frame(width: geo.size.width * min(max(status.fraction, 0), 1))
+                }
+            }
+            .frame(height: 5)
+        }
     }
 }

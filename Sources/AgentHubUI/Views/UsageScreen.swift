@@ -40,6 +40,18 @@ struct UsageScreen: View {
                     )
                 }
 
+                if !state.budgetStatuses.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Budgets").hudLabel()
+                        ForEach(state.budgetStatuses) { status in
+                            BudgetBar(status: status, name: state.budgetName(status.budget),
+                                      detail: "\(state.budgetUsedText(status)) of \(state.budgetLimitText(status.budget))")
+                        }
+                    }
+                    .padding(18)
+                    .glassCard()
+                }
+
                 if summary.daily.isEmpty {
                     VStack(spacing: 10) {
                         Image(systemName: "waveform.path.ecg").font(.system(size: 30)).accentGradient()

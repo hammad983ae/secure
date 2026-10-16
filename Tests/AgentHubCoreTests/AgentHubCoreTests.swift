@@ -668,3 +668,136 @@ final class ConversationTests: XCTestCase {
         XCTAssertEqual(store.loadAll(), [conversation])
     }
 }
+
+final class GitWorkspaceTests: XCTestCase {
+    func git(_ args: String..., in dir: String) throws {
+        let result = try GitWorkspace.run(Array(args), in: dir)
+        XCTAssertEqual(result.status, 0, result.error)
+    }
+
+    func testSnapshotDiffAndUndoLeaveTheIndexAlone() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("gw-\(UUID().uuidString)").path
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        func write(_ name: String, _ text: String) throws {
+            try text.write(toFile: (dir as NSString).appendingPathComponent(name), atomically: true, encoding: .utf8)
+        }
+        func read(_ name: String) -> String? {
+            try? String(contentsOfFile: (dir as NSString).appendingPathComponent(name), encoding: .utf8)
+        }
+
+        try git("init", "-q", in: dir)
+        try git("config", "user.email", "t@example.com", in: dir)
+        try git("config", "user.name", "Test", in: dir)
+        try write("keep.txt", "a\nb\n")
+        try write("gone.txt", "x\n")
+        try git("add", ".", in: dir)
+        try git("commit", "-qm", "init", in: dir)
+        try write("staged.txt", "staged\n")
+        try git("add", "staged.txt", in: dir)
+
+        let root = try XCTUnwrap(GitWorkspace.root(of: dir))
+        let before = try GitWorkspace.snapshot(root: root)
+
+        // The "agent" edits, deletes, and creates files.
+        try write("keep.txt", "a\nB\nc\n")
+        try FileManager.default.removeItem(atPath: (dir as NSString).appendingPathComponent("gone.txt"))
+        try write("new.txt", "new\n")
+        let after = try GitWorkspace.snapshot(root: root)
+
+        let changes = try XCTUnwrap(GitWorkspace.changes(from: before, to: after, root: root))
+        XCTAssertEqual(changes.files, [
+            ChangedFile(path: "gone.txt", status: .deleted, additions: 0, deletions: 1),
+            ChangedFile(path: "keep.txt", status: .modified, additions: 2, deletions: 1),
+            ChangedFile(path: "new.txt", status: .added, additions: 1, deletions: 0),
+        ])
+        let diffs = FileDiff.parse(changes.diff)
+        XCTAssertEqual(diffs.map(\.path), ["gone.txt", "keep.txt", "new.txt"])
+        XCTAssertTrue(diffs[1].lines.contains(FileDiff.Line(kind: .added, text: "B")))
+        XCTAssertTrue(diffs[1].lines.contains(FileDiff.Line(kind: .removed, text: "b")))
+        XCTAssertEqual(try GitWorkspace.editedSinceRun(changes), [])
+
+        // Editing again after the run is detected.
+        try write("keep.txt", "edited later\n")
+        XCTAssertEqual(try GitWorkspace.editedSinceRun(changes), ["keep.txt"])
+
+        try GitWorkspace.undo(changes)
+        XCTAssertEqual(read("keep.txt"), "a\nb\n")
+        XCTAssertEqual(read("gone.txt"), "x\n")
+        XCTAssertNil(read("new.txt"))
+        // The user's staged file is still staged.
+        let status = try GitWorkspace.run(["status", "--porcelain"], in: dir)
+        XCTAssertEqual(status.output.trimmingCharacters(in: .whitespacesAndNewlines), "A  staged.txt")
+    }
+
+    func testNotARepository() {
+        XCTAssertNil(GitWorkspace.root(of: FileManager.default.temporaryDirectory.path))
+    }
+
+    func testParseChangesHandlesBinaryFiles() {
+        let files = GitWorkspace.parseChanges(nameStatus: "M\0img.png\0A\0a b.txt\0", numstat: "-\t-\timg.png\u{0}3\t0\ta b.txt\u{0}")
+        XCTAssertEqual(files, [
+            ChangedFile(path: "img.png", status: .modified, additions: nil, deletions: nil),
+            ChangedFile(path: "a b.txt", status: .added, additions: 3, deletions: 0),
+        ])
+    }
+}
+
+final class BudgetAndPromptTests: XCTestCase {
+    func testBudgetStatusPerAgentAndAll() {
+        let now = Date()
+        let records = [
+            UsageRecord(source: "Claude Code", model: "claude-opus-5-5", date: now, usage: TokenUsage(input: 1_000_000)), // $4
+            UsageRecord(source: "Codex", model: "gpt-5", date: now, usage: TokenUsage(output: 100_000)),                 // $1
+            UsageRecord(source: "Claude Code", model: "claude-opus-5-5", date: now.addingTimeInterval(-40 * 86400), usage: TokenUsage(input: 9_000_000)),
+        ]
+        let claude = Budget(agentID: AgentPresets.claudeCode.id, period: .daily, limit: .dollars(5), hardStop: true)
+        let all = Budget(agentID: nil, period: .monthly, limit: .tokens(1_000_000))
+        let claudeStatus = BudgetEvaluator.status(of: claude, records: records, agents: AgentPresets.all, now: now)
+        XCTAssertEqual(claudeStatus.used, 4, accuracy: 0.0001)
+        XCTAssertTrue(claudeStatus.isWarning)
+        XCTAssertFalse(claudeStatus.isExceeded)
+
+        let allStatus = BudgetEvaluator.status(of: all, records: records, agents: AgentPresets.all, now: now)
+        XCTAssertEqual(allStatus.used, 1_100_000)
+        XCTAssertTrue(allStatus.isExceeded)
+
+        XCTAssertNil(BudgetEvaluator.blockingBudget(for: AgentPresets.claudeCode, statuses: [claudeStatus, allStatus]))
+        var stopped = allStatus
+        stopped.budget.hardStop = true
+        XCTAssertEqual(BudgetEvaluator.blockingBudget(for: AgentPresets.codex, statuses: [claudeStatus, stopped])?.id, all.id)
+    }
+
+    func testPromptExpansion() {
+        let handles: Set<String> = ["claude", "codex"]
+        let prompts = SavedPrompt.defaults
+        let tests = PromptLibrary.expand("/tests the cart module", prompts: prompts, knownHandles: handles)
+        XCTAssertEqual(tests, "@claude Write tests for the cart module. Follow the project's existing test style, run them, and fix anything that fails.")
+
+        let review = PromptLibrary.expand("/review @codex focus on auth", prompts: prompts, knownHandles: handles)
+        XCTAssertTrue(review?.hasPrefix("@codex Review the uncommitted changes") == true)
+        XCTAssertTrue(review?.hasSuffix("focus on auth") == true)
+
+        let custom = SavedPrompt(name: "summ", title: "Summarize", body: "Summarize this.", agents: [])
+        XCTAssertEqual(PromptLibrary.expand("/summ the README", prompts: [custom], knownHandles: handles), "Summarize this.\n\nthe README")
+        XCTAssertNil(PromptLibrary.expand("/nope x", prompts: prompts, knownHandles: handles))
+        XCTAssertNil(PromptLibrary.expand("hello", prompts: prompts, knownHandles: handles))
+        XCTAssertEqual(PromptLibrary.completions(for: "/re", prompts: prompts).map(\.name), ["review"])
+        XCTAssertEqual(PromptLibrary.completions(for: "/review x", prompts: prompts), [])
+    }
+
+    func testWidgetSnapshotRoundTrip() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("widget-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        var snapshot = WidgetSnapshot.placeholder
+        snapshot.updated = Date(timeIntervalSince1970: 1_800_000_000)
+        try snapshot.save(to: url)
+        XCTAssertEqual(WidgetSnapshot.load(from: url), snapshot)
+    }
+
+    func testConfigWithoutBudgetsGetsDefaultPrompts() throws {
+        let config = try JSONDecoder().decode(HubConfiguration.self, from: Data(#"{"agents":[],"mcpServers":[]}"#.utf8))
+        XCTAssertEqual(config.budgets, [])
+        XCTAssertEqual(config.prompts.map(\.name), ["review", "tests", "explain", "fix"])
+    }
+}

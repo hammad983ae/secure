@@ -2,13 +2,16 @@ import AgentHubCore
 import AppKit
 import SwiftUI
 
-@main
+/// The app's scenes. Launched by `main.swift` in the SwiftPM executable and
+/// in the Xcode app target.
 @MainActor
-struct AgentHubApp: App {
+public struct AgentHubApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var state = AppState(demo: Snapshot.isRequested)
 
-    var body: some Scene {
+    public init() {}
+
+    public var body: some Scene {
         WindowGroup("Agent Hub", id: "main") {
             RootView()
                 .environment(state)

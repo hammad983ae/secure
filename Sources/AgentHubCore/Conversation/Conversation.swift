@@ -14,6 +14,8 @@ public struct AgentRun: Codable, Identifiable, Hashable, Sendable {
     public var reportedCost: Double?
     public var startedAt: Date
     public var finishedAt: Date?
+    /// Files the run changed (git working folders only).
+    public var changes: RunChanges?
 
     public init(id: UUID = UUID(), agent: AgentDefinition, startedAt: Date = Date()) {
         self.id = id
