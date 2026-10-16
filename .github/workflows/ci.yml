@@ -35,7 +35,7 @@ jobs:
           brew install xcodegen
           cd App && xcodegen generate
           xcodebuild -project AgentHub.xcodeproj -scheme AgentHub -configuration Debug \
-            -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build 2>&1 | tee xcodebuild.log | grep -E "error:|warning:.*App/|BUILD (SUCCEEDED|FAILED)" || true
+            -destination "platform=macOS,arch=arm64" -skipPackagePluginValidation -skipMacroValidation CODE_SIGNING_ALLOWED=NO build 2>&1 | tee xcodebuild.log | grep -E "error:|warning:.*App/|BUILD (SUCCEEDED|FAILED)" || true
           grep -q "BUILD SUCCEEDED" xcodebuild.log || { tail -120 xcodebuild.log; exit 1; }
       - name: Bundle app
         run: ./scripts/bundle.sh

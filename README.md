@@ -28,7 +28,7 @@ A native macOS command center for your AI agents, with a chat interface on top.
 ./App/make-project.sh        # installs XcodeGen if needed, generates and opens App/AgentHub.xcodeproj
 ```
 
-In Xcode, pick the **AgentHub** scheme and press ⌘R. To install it, use *Product → Archive* or copy `Agent Hub.app` from the build folder into `/Applications`.
+In Xcode, pick the **AgentHub** scheme and press ⌘R. The first build asks you to trust SwiftTerm's build plugin: click **Trust & Enable**. To install it, use *Product → Archive* or copy `Agent Hub.app` from the build folder into `/Applications`.
 
 To add the widget: run the app once, then right-click the desktop → *Edit Widgets…* (or open Notification Center) and search for **Agent Hub**. If it doesn't show up, set your Apple ID team for both targets under *Signing & Capabilities* and run again.
 
